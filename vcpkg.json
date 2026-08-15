@@ -1,0 +1,23 @@
+{
+  "name": "devbench",
+  "version-string": "1.14.0",
+  "description": "MCP + REST test bench host for Bethesda-engine mod development (Fallout 4 / Fallout 4 VR build)",
+  "homepage": "https://github.com/alandtse/devbench",
+  "license": "GPL-3.0-or-later",
+  "dependencies": [
+    "nlohmann-json",
+    "stb",
+    "spdlog",
+    "boost-stl-interfaces",
+    "robin-hood-hashing",
+    "rsm-binary-io",
+    "rsm-mmio",
+    "srell",
+    "xbyak",
+    "frozen",
+    "rapidcsv",
+    "args",
+    "nowide"
+  ],
+  "builtin-baseline": "b4a3d89125e45bc8f80fb94bef9761d4f4e14fb9"
+}

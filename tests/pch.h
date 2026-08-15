@@ -1,10 +1,15 @@
 #pragma once
 
-// Test-only precompiled header. The production PCH (src/pch.h) pulls in
-// RE/Skyrim.h + SKSE and aliases `namespace logs = SKSE::log`. The unit tests
-// link NONE of CommonLibSSE-NG/SKSE — they compile only the host-independent
-// production TUs (e.g. ToolRegistry.cpp) — so we supply a no-op `logs` stub with
-// the same call surface. Messages are discarded; tests assert on return values.
+// Test-only precompiled header. The Skyrim PCH (src/platform/skyrim/pch.h) pulls
+// in RE/Skyrim.h + SKSE and aliases `namespace logs = SKSE::log`. The unit tests
+// link NONE of CommonLibSSE-NG/SKSE — they compile only the game-agnostic core
+// TUs (src/core/**) — so we supply a no-op `logs` stub with the same call surface
+// for any platform code that leaks in.
+//
+// Core code does not need the stub: it logs through dvb::dlog, whose sink is
+// simply never installed in a test binary, so every core log line is discarded by
+// construction. That the tests build at all is the standing check that src/core
+// really is free of the script extender.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX

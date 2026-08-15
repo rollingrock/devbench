@@ -5,3 +5,6 @@
 [submodule "lib/cpp-mcp"]
 	path = lib/cpp-mcp
 	url = https://github.com/hkr04/cpp-mcp.git
+[submodule "extern/CommonLibF4"]
+	path = extern/CommonLibF4
+	url = https://github.com/rollingrock/CommonLibF4.git

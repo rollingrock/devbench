@@ -1,0 +1,47 @@
+{
+	"version": 3,
+	"configurePresets": [
+		{
+			"name": "base",
+			"hidden": true,
+			"binaryDir": "${sourceDir}/build",
+			"generator": "Visual Studio 17 2022",
+			"architecture": "x64",
+			"cacheVariables": {
+				"CMAKE_BUILD_TYPE": "Release",
+				"CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
+				"VCPKG_TARGET_TRIPLET": "x64-windows-static"
+			}
+		},
+		{
+			"name": "vcpkg",
+			"hidden": true,
+			"cacheVariables": {
+				"CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+			}
+		},
+		{
+			"name": "fallout4",
+			"displayName": "Fallout 4 / Fallout 4 VR (F4SE)",
+			"inherits": ["base", "vcpkg"]
+		},
+		{
+			"name": "fallout4-ninja",
+			"displayName": "Fallout 4 / Fallout 4 VR (F4SE, Ninja)",
+			"inherits": ["base", "vcpkg"],
+			"generator": "Ninja",
+			"binaryDir": "${sourceDir}/build-ninja"
+		}
+	],
+	"buildPresets": [
+		{
+			"name": "fallout4",
+			"configurePreset": "fallout4",
+			"configuration": "Release"
+		},
+		{
+			"name": "fallout4-ninja",
+			"configurePreset": "fallout4-ninja"
+		}
+	]
+}

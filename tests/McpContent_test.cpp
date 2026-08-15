@@ -6,7 +6,7 @@
 
 #include "test_framework.h"
 
-#include "McpContent.h"
+#include "core/McpContent.h"
 
 using dvb::json;
 using dvb::ToContentBlocks;

@@ -59,8 +59,8 @@ add_deps("commonlibsse-ng")
 add_packages("skse-menu-framework-api", "nlohmann_json")
 add_defines("_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING") -- SMF header uses std::wstring_convert
 add_defines("UNICODE", "_UNICODE", "_WINSOCKAPI_")
-add_files("src/RecordingsMenu.cpp")
-add_includedirs("src")
+add_files("src/platform/skyrim/RecordingsMenu.cpp")
+add_includedirs("src", "src/platform/skyrim")
 target_end()
 
 -- The FUCK-hosted in-game menu also lives in its own PCH-free static lib: FUCK_API.h pulls in the
@@ -71,8 +71,8 @@ set_warnings("all")
 add_deps("commonlibsse-ng")
 add_packages("fuck-api", "imgui", "simpleini", "nlohmann_json")
 add_defines("UNICODE", "_UNICODE", "_WINSOCKAPI_")
-add_files("src/RecordingsMenuFuck.cpp")
-add_includedirs("src")
+add_files("src/platform/skyrim/RecordingsMenuFuck.cpp")
+add_includedirs("src", "src/platform/skyrim")
 target_end()
 
 -- target
@@ -103,20 +103,25 @@ add_rules("commonlibsse-ng.plugin", {
     description = "MCP + REST test bench host for Skyrim mod development",
 })
 
--- sources
+-- sources. The layout is src/core (game-agnostic) + src/platform/<game>; the
+-- recursive glob picks both up, and the Fallout platform is excluded because it
+-- includes F4SE headers this target does not have.
 add_files("src/**.cpp")
+remove_files("src/platform/fallout4/**.cpp")
 -- RecordingsMenu.cpp is SMF/cimgui and PCH-free — it belongs only to devbench-UI. The glob above
 -- would otherwise also compile it here with the real-imgui PCH, which conflicts.
-remove_files("src/RecordingsMenu.cpp")
+remove_files("src/platform/skyrim/RecordingsMenu.cpp")
 -- RecordingsMenuFuck.cpp is FUCK/real-imgui and PCH-free — it belongs only to devbench-UI-fuck.
-remove_files("src/RecordingsMenuFuck.cpp")
+remove_files("src/platform/skyrim/RecordingsMenuFuck.cpp")
 add_headerfiles("src/**.h")
-add_includedirs("src")
+-- "src" resolves core/... includes; "src/platform/skyrim" lets the Skyrim sources
+-- keep including their siblings unqualified.
+add_includedirs("src", "src/platform/skyrim")
 -- Public C-ABI consumer header (DevBenchAPI.h). The companion DevBenchAPI.cpp is
 -- consumer-only and intentionally NOT globbed into this target.
 add_includedirs("include")
 add_headerfiles("include/*.h")
-set_pcxxheader("src/pch.h")
+set_pcxxheader("src/platform/skyrim/pch.h")
 add_configfiles("src/Version.h.in")
 -- Version.h is generated into the build config-files dir; put it on the include
 -- path so sources (main.cpp, Server.cpp) can #include "Version.h".
@@ -156,8 +161,9 @@ set_languages("c++23")
 add_packages("nlohmann_json", "stb")
 add_includedirs("src")
 add_files("tests/*.cpp")
-add_files("src/ToolRegistry.cpp") -- exercised directly; pure logic, no game deps
-add_files("src/Ssim.cpp") -- exercised directly; pure logic, no game deps
+add_files("src/core/ToolRegistry.cpp") -- exercised directly; pure logic, no game deps
+add_files("src/core/Ssim.cpp") -- exercised directly; pure logic, no game deps
+add_files("src/core/Host.cpp", "src/core/Log.cpp") -- the platform seam, stubbed by tests/pch.h
 add_headerfiles("tests/*.h")
 set_pcxxheader("tests/pch.h")
 add_defines("_WINSOCKAPI_")

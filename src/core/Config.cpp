@@ -1,0 +1,167 @@
+#include "core/Config.h"
+
+#include "core/Host.h"
+#include "core/Json.h"
+#include "core/Log.h"
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+
+namespace dvb
+{
+	namespace
+	{
+		// Write the config as JSON so a fresh install ships a self-documenting file the
+		// user/agent can edit, rather than having to know the keys exist.
+		void WriteConfig(const std::filesystem::path& a_path, const Config& a_cfg)
+		{
+			std::error_code ec;
+			std::filesystem::create_directories(a_path.parent_path(), ec);
+			std::ofstream out(a_path, std::ios::trunc);
+			if (!out) {
+				dlog::warn("devbench: could not write default config to {}", a_path.string());
+				return;
+			}
+			const json j{
+				{ "enabled", a_cfg.enabled },
+				{ "port", a_cfg.port },
+				{ "logLevel", a_cfg.logLevel },
+				{ "recordHotkey", a_cfg.recordHotkey },
+				{ "replayHotkey", a_cfg.replayHotkey },
+				{ "recordHotkeyShift", a_cfg.recordHotkeyShift },
+				{ "replayHotkeyShift", a_cfg.replayHotkeyShift },
+				{ "replayPath", a_cfg.replayPath },
+				{ "replayRestoreScene", a_cfg.replayRestoreScene },
+				{ "recordIntervalMs", a_cfg.recordIntervalMs },
+				{ "autoRunPath", a_cfg.autoRunPath },
+				{ "autoRunRestoreScene", a_cfg.autoRunRestoreScene },
+				{ "loadSettleMs", a_cfg.loadSettleMs },
+				{ "couplingAnchorMs", a_cfg.couplingAnchorMs },
+				{ "couplingCellMs", a_cfg.couplingCellMs },
+				{ "cleanTransition", a_cfg.cleanTransition },
+				{ "cleanTransitionCell", a_cfg.cleanTransitionCell },
+				{ "captureDir", a_cfg.captureDir },
+				{ "captureScanDirs", a_cfg.captureScanDirs },
+				{ "captureTimeoutMs", a_cfg.captureTimeoutMs },
+				{ "captureSettleMs", a_cfg.captureSettleMs },
+				{ "stallWatchdogMs", a_cfg.stallWatchdogMs },
+				{ "allowMemoryWrites", a_cfg.allowMemoryWrites },
+			};
+			out << j.dump(2) << '\n';
+		}
+	}
+
+	int DefaultPort()
+	{
+		const auto& id = host::Get();
+		if (id.game == "fallout4")
+			return id.vr ? 8931 : 8930;
+		if (id.game == "starfield")
+			return 8940;
+		return id.vr ? 8921 : 8920;  // skyrim, and the fallback for an unknown game
+	}
+
+	void SaveHotkeys(int a_recordKey, bool a_recordShift, int a_replayKey, bool a_replayShift)
+	{
+		const std::filesystem::path path = host::DataDir() / "config.json";
+		json                        j = json::object();
+		if (std::ifstream in(path); in) {
+			try {
+				j = json::parse(in, nullptr, /*allow_exceptions=*/true, /*ignore_comments=*/true);
+			} catch (...) {
+				j = json::object();  // corrupt file → still write a valid one with the new binds
+			}
+		}
+		j["recordHotkey"] = a_recordKey;
+		j["recordHotkeyShift"] = a_recordShift;
+		j["replayHotkey"] = a_replayKey;
+		j["replayHotkeyShift"] = a_replayShift;
+
+		std::error_code ec;
+		std::filesystem::create_directories(path.parent_path(), ec);
+		const std::filesystem::path tmp = path.string() + ".tmp";
+		if (std::ofstream out(tmp, std::ios::trunc); out)
+			out << j.dump(2) << '\n';
+		else {
+			dlog::warn("devbench: could not write hotkeys to {}", tmp.string());
+			return;
+		}
+		std::filesystem::rename(tmp, path, ec);  // atomic replace; no torn read
+		if (ec)
+			dlog::warn("devbench: could not replace config.json ({})", ec.message());
+	}
+
+	Config LoadConfig()
+	{
+		Config cfg;
+		// Deterministic default port per game+runtime so a fixed MCP client URL never moves
+		// (see DefaultPort). Each runtime runs from its own Data dir, so the per-runtime
+		// ports never collide — register one client entry each; the game that's off just
+		// shows disconnected. An explicit "port" in config.json overrides this.
+		cfg.port = DefaultPort();
+		cfg.captureDir = (host::DataDir() / "captures").string();
+		const std::filesystem::path path = host::DataDir() / "config.json";
+
+		std::ifstream file(path);
+		if (!file.is_open()) {
+			WriteConfig(path, cfg);  // first run: leave a self-documenting template behind
+			dlog::info("devbench: no config at {} — wrote defaults (enabled, port {}, logLevel {})",
+				path.string(), cfg.port, cfg.logLevel);
+			return cfg;
+		}
+		try {
+			// Allow // comments (the documented jsonc form) so a commented config still
+			// parses instead of silently falling back to defaults.
+			const json j = json::parse(file, nullptr, /*allow_exceptions=*/true, /*ignore_comments=*/true);
+			cfg.enabled = j.value("enabled", cfg.enabled);
+			cfg.port = j.value("port", cfg.port);
+			cfg.logLevel = j.value("logLevel", cfg.logLevel);
+			cfg.recordHotkey = j.value("recordHotkey", cfg.recordHotkey);
+			cfg.replayHotkey = j.value("replayHotkey", cfg.replayHotkey);
+			cfg.recordHotkeyShift = j.value("recordHotkeyShift", cfg.recordHotkeyShift);
+			cfg.replayHotkeyShift = j.value("replayHotkeyShift", cfg.replayHotkeyShift);
+			cfg.replayPath = j.value("replayPath", cfg.replayPath);
+			cfg.replayRestoreScene = j.value("replayRestoreScene", cfg.replayRestoreScene);
+			cfg.recordIntervalMs = j.value("recordIntervalMs", cfg.recordIntervalMs);
+			cfg.autoRunPath = j.value("autoRunPath", cfg.autoRunPath);
+			cfg.autoRunRestoreScene = j.value("autoRunRestoreScene", cfg.autoRunRestoreScene);
+			cfg.loadSettleMs = j.value("loadSettleMs", cfg.loadSettleMs);
+			cfg.couplingAnchorMs = j.value("couplingAnchorMs", cfg.couplingAnchorMs);
+			cfg.couplingCellMs = j.value("couplingCellMs", cfg.couplingCellMs);
+			cfg.cleanTransition = j.value("cleanTransition", cfg.cleanTransition);
+			cfg.cleanTransitionCell = j.value("cleanTransitionCell", cfg.cleanTransitionCell);
+			cfg.captureDir = j.value("captureDir", cfg.captureDir);
+			cfg.captureScanDirs = j.value("captureScanDirs", cfg.captureScanDirs);
+			cfg.captureTimeoutMs = j.value("captureTimeoutMs", cfg.captureTimeoutMs);
+			cfg.captureSettleMs = j.value("captureSettleMs", cfg.captureSettleMs);
+			cfg.stallWatchdogMs = j.value("stallWatchdogMs", cfg.stallWatchdogMs);
+			cfg.allowMemoryWrites = j.value("allowMemoryWrites", cfg.allowMemoryWrites);
+
+			// Migrate forward: if the file predates any key (e.g. an install from before
+			// the record hotkeys existed), rewrite it so the new keys appear with their
+			// defaults — otherwise a user never discovers options added in an update. The
+			// values just loaded above are preserved; only absent keys gain defaults.
+			static constexpr const char* kKeys[] = {
+				"enabled", "port", "logLevel", "recordHotkey", "replayHotkey",
+				"recordHotkeyShift", "replayHotkeyShift", "replayPath", "replayRestoreScene",
+				"recordIntervalMs", "autoRunPath", "autoRunRestoreScene", "loadSettleMs",
+				"couplingAnchorMs", "couplingCellMs", "cleanTransition", "cleanTransitionCell",
+				"captureDir", "captureScanDirs", "captureTimeoutMs", "captureSettleMs",
+				"stallWatchdogMs", "allowMemoryWrites"
+			};
+			const bool complete = std::all_of(std::begin(kKeys), std::end(kKeys),
+				[&](const char* k) { return j.contains(k); });
+			if (!complete) {
+				WriteConfig(path, cfg);
+				dlog::info("devbench: config migrated — added missing keys with defaults");
+			}
+		} catch (const std::exception& e) {
+			dlog::warn("devbench: bad config ({}) — using defaults", e.what());
+			return Config{};
+		}
+		dlog::info("devbench: config enabled={} port={} logLevel={}", cfg.enabled, cfg.port, cfg.logLevel);
+		return cfg;
+	}
+}

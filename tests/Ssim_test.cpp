@@ -5,7 +5,7 @@
 
 #include "test_framework.h"
 
-#include "Ssim.h"
+#include "core/Ssim.h"
 
 #include <cmath>
 #include <cstdint>

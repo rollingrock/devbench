@@ -4,7 +4,7 @@
 
 #include "test_framework.h"
 
-#include "ToolRegistry.h"
+#include "core/ToolRegistry.h"
 
 using dvb::json;
 using dvb::ToolContext;
