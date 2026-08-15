@@ -30,6 +30,7 @@
 #include "core/gfx/Device.h"
 
 #include "core/Log.h"
+#include "core/gfx/Validate.h"
 #include "core/tools/Memory.h"
 
 #include <d3d11.h>
@@ -44,45 +45,9 @@ namespace
 	constexpr std::uintptr_t kTargetStride = 0x30;             // sizeof(RenderTarget)
 	constexpr std::uint32_t  kTargetCount = 101;
 
-	// A COM object's first qword is its vtable, and that vtable lives in a loaded
-	// module. Both reads are SEH-guarded, so a wrong offset produces `false` instead
-	// of an access violation. This is the cheap filter that runs BEFORE any virtual
-	// call on a candidate pointer.
-	bool LooksLikeCOM(const void* a_p) noexcept
-	{
-		const auto va = reinterpret_cast<std::uintptr_t>(a_p);
-		if (va < 0x10000 || (va & 7) != 0)
-			return false;
-		std::uintptr_t vtable = 0;
-		if (!dvb::mem::SafeRead(a_p, &vtable, sizeof(vtable)) || vtable < 0x10000 || (vtable & 7) != 0)
-			return false;
-		std::uintptr_t firstMethod = 0;
-		return dvb::mem::SafeRead(reinterpret_cast<const void*>(vtable), &firstMethod, sizeof(firstMethod)) &&
-		       firstMethod >= 0x10000;
-	}
-
-	// GetDesc is a virtual call, so even a COM-shaped pointer can still fault if the
-	// object is not really a texture. Guarded, and free of anything needing
-	// destruction so MSVC will accept __try here.
-	bool SafeGetDesc(ID3D11Texture2D* a_tex, D3D11_TEXTURE2D_DESC* a_out) noexcept
-	{
-		__try {
-			a_tex->GetDesc(a_out);
-			return true;
-		} __except (EXCEPTION_EXECUTE_HANDLER) {
-			return false;
-		}
-	}
-
-	bool PlausibleTarget(ID3D11Texture2D* a_tex) noexcept
-	{
-		if (!LooksLikeCOM(a_tex))
-			return false;
-		D3D11_TEXTURE2D_DESC desc{};
-		if (!SafeGetDesc(a_tex, &desc))
-			return false;
-		return desc.Width > 0 && desc.Width <= 16384 && desc.Height > 0 && desc.Height <= 16384;
-	}
+	// LooksLikeCOM / PlausibleTexture now live in core/gfx/Validate.* — the same checks
+	// Skyrim's seam needs, and a safety gate is the last thing that should exist in two
+	// copies. Behaviour is unchanged; PlausibleTarget was renamed PlausibleTexture.
 
 	struct Resolved
 	{
@@ -134,7 +99,7 @@ namespace
 		dvb::mem::SafeRead(reinterpret_cast<const void*>(rendererData + kDeviceOffset), &device, sizeof(device));
 		dvb::mem::SafeRead(reinterpret_cast<const void*>(rendererData + kContextOffset), &context, sizeof(context));
 
-		if (!LooksLikeCOM(reinterpret_cast<void*>(device)) || !LooksLikeCOM(reinterpret_cast<void*>(context))) {
+		if (!dvb::gfx::LooksLikeCOM(reinterpret_cast<void*>(device)) || !dvb::gfx::LooksLikeCOM(reinterpret_cast<void*>(context))) {
 			// The renderer is either not up yet or the offsets are wrong for this
 			// build. Do NOT latch: leaving `tried` false lets a later call succeed
 			// once the device exists, which is the overwhelmingly common case.
@@ -149,7 +114,7 @@ namespace
 		for (std::uint32_t i = 0; i < kTargetCount; ++i) {
 			std::uintptr_t tex = 0;
 			if (dvb::mem::SafeRead(reinterpret_cast<const void*>(targets + i * kTargetStride), &tex, sizeof(tex)) &&
-				tex && PlausibleTarget(reinterpret_cast<ID3D11Texture2D*>(tex)))
+				tex && dvb::gfx::PlausibleTexture(reinterpret_cast<ID3D11Texture2D*>(tex)))
 				++valid;
 		}
 		if (valid < 4) {
@@ -199,7 +164,7 @@ namespace dvb::gfx
 			// Re-validate per call, not just at resolve time: the engine frees and
 			// recreates targets on a resolution change, and a stale slot would be a
 			// dangling pointer we then hand to CopySubresourceRegion.
-			if (!PlausibleTarget(texture))
+			if (!dvb::gfx::PlausibleTexture(texture))
 				continue;
 			out.push_back(TargetRef{ i, texture });
 		}
