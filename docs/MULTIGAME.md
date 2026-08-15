@@ -216,8 +216,9 @@ on its own.
 
 - **GPU timestamp stage timers** — per-stage GPU *and* CPU ms with disjoint handling.
   Deferred deliberately: it needs instrumentation points, which means exposing it through
-  the C-ABI so a mod can bracket its own passes — and the C-ABI is Skyrim-typed today
-  (see §7). A `gputimer` tool with nothing registered would be vaporware.
+  the C-ABI so a mod can bracket its own passes. The C-ABI is no longer the blocker (§7 —
+  it is game-neutral now); the instrumentation points still have to be designed, and a
+  `gputimer` tool with nothing registered would be vaporware.
 - **Depth/stencil and cube targets.** Only 2D colour targets are enumerated.
 - **Named targets on Fallout.** The engine addresses targets by *logical* id through
   RenderTargetManager's remap table, a different index space from the physical slots.
@@ -266,10 +267,27 @@ that claims less:
 - **Naming.** `RegisterCoreTools` in `platform/skyrim/Tools.cpp` now registers *game*
   tools while `tools::RegisterCommonTools` registers the core ones. That is backwards and
   should be renamed; it was left alone here to keep the diff about the split.
-- **`DevBenchAPI.h` is Skyrim-typed** (`#include <RE/Skyrim.h>`, `SKSE::` messaging). The
-  C-ABI itself is game-neutral — only the discovery handshake is not. Options: per-game
-  headers sharing one ABI, or a small game-neutral header plus a per-game shim. Worth
-  settling before Fallout consumers exist, not after.
+- ~~**`DevBenchAPI.h` is Skyrim-typed**~~ — **SETTLED, and it turned out not to need a
+  design.** The option taken was neither per-game headers nor a shim: the header simply
+  stopped including an extender. Every declaration in it (message id, function-pointer
+  types, vtable) was already plain C++; `<RE/Skyrim.h>` + `<SKSE/SKSE.h>` were only there
+  for `GetDevBenchInterface001`, which lives in the *consumer-only* `DevBenchAPI.cpp` —
+  and SKSE and F4SE spell that one dispatch identically, so that file picks its extender
+  with `__has_include` plus a `DEVBENCHAPI_GAME_*` override.
+
+  The provider side moved with it: `HostApi.{h,cpp}` are now **core**, taking the three
+  message fields they use (`type, data, sender`) instead of an
+  `SKSE::MessagingInterface::Message*`. Each platform's listener does a three-line unpack.
+  Two knock-on details worth knowing:
+  - `GetBuildNumber()` is now passed in at `HostApi::Init` rather than read from the
+    generated `Version.h`, so the core keeps compiling with no configured headers.
+    `DEVBENCH_BUILD_NUMBER` is defined once in `Version.h.in` so the two platforms cannot
+    drift.
+  - **`src/core/HostApi.cpp` is compiled by the `devbench-tests` target purely to enforce
+    the no-extender invariant.** It needed `tests/PlatformStubs.cpp` for
+    `game::CurrentFrame`. Without that, a re-coupling would have been invisible: both real
+    plugin targets have an extender on the include path via their PCH and would have kept
+    building.
 - **Should the core become its own repo / vcpkg port?** Argument for: Starfield next, and
   `devbench-api` is already a port. Argument against: one repo is exactly what stops the
   divergence this branch exists to prevent. Recommendation is to stay one repo until a

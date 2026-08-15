@@ -1,12 +1,12 @@
-#include "HostApi.h"
+#include "core/HostApi.h"
 
 #include "DevBenchAPI.h"
 #include "core/EventBus.h"
 #include "core/GameState.h"
 #include "core/Json.h"
+#include "core/Log.h"
 #include "core/ToolExtensions.h"
 #include "core/ToolRegistry.h"
-#include "Version.h"
 
 #include <ctime>
 #include <mutex>
@@ -17,6 +17,7 @@ namespace dvb::HostApi
 	{
 		ToolRegistry* g_registry = nullptr;
 		EventBus*     g_events = nullptr;
+		unsigned int  g_buildNumber = 0;  // supplied by the platform at Init
 
 		// Registrant ledger: who asked for the C-ABI interface, and what they registered
 		// through it. Both grow only (append-only, process lifetime) — a plugin unregistering
@@ -76,7 +77,7 @@ namespace dvb::HostApi
 		{
 			unsigned int GetBuildNumber() override
 			{
-				return DEVBENCH_VERSION_MAJOR * 10000u + DEVBENCH_VERSION_MINOR * 100u + DEVBENCH_VERSION_PATCH;
+				return g_buildNumber;
 			}
 
 			bool RegisterTool(const char* a_name, const char* a_descriptorJson,
@@ -185,20 +186,21 @@ namespace dvb::HostApi
 		}
 	}
 
-	void Init(ToolRegistry& a_registry, EventBus& a_events)
+	void Init(ToolRegistry& a_registry, EventBus& a_events, unsigned int a_buildNumber)
 	{
 		g_registry = &a_registry;
 		g_events = &a_events;
+		g_buildNumber = a_buildNumber;
 		RegisterSelfTest();
 		RegisterExtensionSelfTests();
 	}
 
-	void OnInterfaceRequest(SKSE::MessagingInterface::Message* a_message)
+	void OnInterfaceRequest(std::uint32_t a_type, void* a_data, const char* a_sender)
 	{
-		if (a_message && a_message->type == DevBenchAPI::DevBenchMessage::kMessage_GetInterface && a_message->data) {
-			static_cast<DevBenchAPI::DevBenchMessage*>(a_message->data)->GetApiFunction = GetApi;
-			NoteConsumer(a_message->sender);
-			logs::info("devbench: provided plugin interface to {}", a_message->sender ? a_message->sender : "<?>");
+		if (a_type == DevBenchAPI::DevBenchMessage::kMessage_GetInterface && a_data) {
+			static_cast<DevBenchAPI::DevBenchMessage*>(a_data)->GetApiFunction = GetApi;
+			NoteConsumer(a_sender);
+			dlog::info("devbench: provided plugin interface to {}", a_sender ? a_sender : "<?>");
 		}
 	}
 

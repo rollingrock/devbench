@@ -1,21 +1,34 @@
 // SPDX-License-Identifier: MIT
 //
 // This interface header and its companion DevBenchAPI.cpp are MIT-licensed (see
-// DevBenchAPI.LICENSE.txt) so ANY SKSE plugin — including proprietary/closed-source —
-// may vendor them to talk to devbench, independent of the devbench plugin's GPL-3.0.
-// They are self-contained: drop both files into your plugin (or consume the
-// devbench-api vcpkg port) and build — no other devbench source is needed.
+// DevBenchAPI.LICENSE.txt) so ANY script-extender plugin — including
+// proprietary/closed-source — may vendor them to talk to devbench, independent of the
+// devbench plugin's GPL-3.0. They are self-contained: drop both files into your plugin
+// (or consume the devbench-api vcpkg port) and build — no other devbench source is
+// needed.
 #pragma once
 
 #include <cstdint>
 
-#include <RE/Skyrim.h>
-#include <SKSE/SKSE.h>
-
-// devbench cross-plugin API — lets another SKSE plugin register MCP/REST tools and
-// emit events into the running devbench host. Usage: after SKSE sends your plugin
-// kPostLoad, request the interface via an SKSE messaging dispatch, then call through
-// the versioned abstract interface below.
+// NO SCRIPT-EXTENDER HEADER HERE, DELIBERATELY.
+//
+// Two reasons, and the second is a hard build invariant:
+//
+// 1. This ABI is game-neutral. Every declaration below is plain C++ — the message id,
+//    the function-pointer types and the vtable. Nothing in it is Skyrim-shaped, and
+//    pulling <SKSE/SKSE.h> in only ever made it *look* Skyrim-only. The one piece that
+//    genuinely needs an extender is GetDevBenchInterface001(), which dispatches a
+//    message; that lives in DevBenchAPI.cpp, which picks SKSE or F4SE at compile time.
+//
+// 2. devbench's own src/core/ MUST NOT include a script-extender header (see
+//    docs/MULTIGAME.md — the unit-test target, which links neither extender, is what
+//    keeps that honest). The host side of this ABI lives in the core, so it includes
+//    this file; if this file pulled in SKSE the core could not.
+//
+// devbench cross-plugin API — lets another SKSE or F4SE plugin register MCP/REST tools
+// and emit events into the running devbench host. Usage: once your plugin has loaded
+// (SKSE kPostLoad / F4SE kPostLoad), request the interface via a messaging dispatch,
+// then call through the versioned abstract interface below.
 //
 // The call direction is reversed from a typical query API: you hand devbench a handler
 // that it calls back when a tool is invoked. So payloads are JSON strings and the
@@ -47,7 +60,9 @@ namespace DevBenchAPI
 	};
 
 	struct IDevBenchInterface001;
-	// Call only after SKSE sends kPostLoad. Returns nullptr if devbench is absent.
+	// Call only after your extender has sent kPostLoad. Returns nullptr if devbench is
+	// absent. Defined in DevBenchAPI.cpp, which is the only extender-aware part of this
+	// ABI: it compiles against SKSE or F4SE (auto-detected, overridable — see that file).
 	IDevBenchInterface001* GetDevBenchInterface001();
 
 	struct IDevBenchInterface001

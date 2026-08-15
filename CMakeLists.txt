@@ -97,6 +97,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 	${CMAKE_CURRENT_BINARY_DIR}/include
 	${CMAKE_CURRENT_SOURCE_DIR}/src
 	${CMAKE_CURRENT_SOURCE_DIR}/src/platform/fallout4
+	# The published cross-plugin ABI header. The core's HostApi.cpp (the PROVIDER half)
+	# includes it, so it belongs on every platform's include path, not just Skyrim's.
+	# Only the header is compiled here — DevBenchAPI.cpp is the CONSUMER half and is
+	# deliberately not a source of this target.
+	${CMAKE_CURRENT_SOURCE_DIR}/include
 	${STB_INCLUDE_DIRS}
 )
 

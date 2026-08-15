@@ -4,3 +4,12 @@
 #define DEVBENCH_VERSION_MINOR ${VERSION_MINOR}
 #define DEVBENCH_VERSION_PATCH ${VERSION_PATCH}
 #define DEVBENCH_VERSION_STRING "${VERSION_STRING}"
+
+// What GetBuildNumber() publishes over the cross-plugin C-ABI, and what a consumer
+// compares against to decide whether a later-appended vtable slot exists (e.g. >= 10500
+// for RegisterToolExtension). Defined once, here, because each platform now passes it
+// into HostApi::Init: two platforms open-coding the same MAJOR*10000+MINOR*100+PATCH is
+// two places for it to drift, and a wrong build number does not fail loudly — it makes a
+// consumer call a vtable slot that is not there.
+#define DEVBENCH_BUILD_NUMBER \
+	(DEVBENCH_VERSION_MAJOR * 10000u + DEVBENCH_VERSION_MINOR * 100u + DEVBENCH_VERSION_PATCH)

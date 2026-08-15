@@ -4,7 +4,7 @@
 #include "ConsoleHook.h"
 #include "GameEvents.h"
 #include "core/GameState.h"
-#include "HostApi.h"
+#include "core/HostApi.h"
 #include "InputHotkeys.h"
 #include "Recording.h"
 #include "RecordingsMenu.h"
@@ -61,7 +61,10 @@ namespace
 	// interface request would never reach us without this. Only acts on the request.
 	void OnInterfaceMessage(SKSE::MessagingInterface::Message* a_msg)
 	{
-		dvb::HostApi::OnInterfaceRequest(a_msg);
+		// Unpack SKSE's Message here: HostApi lives in the core now and must not name a
+		// script-extender type. F4SE's listener does the identical three-field unpack.
+		if (a_msg)
+			dvb::HostApi::OnInterfaceRequest(a_msg->type, a_msg->data, a_msg->sender);
 	}
 
 	void OnMessage(SKSE::MessagingInterface::Message* a_msg)
@@ -95,7 +98,7 @@ namespace
 				dvb::Capture::SetEvents(&g_server->Events());
 				dvb::Capture::SetDefaults(cfg);
 				dvb::ArmAutoRun(g_server->Tools(), cfg.autoRunPath, cfg.autoRunRestoreScene);
-				dvb::HostApi::Init(g_server->Tools(), g_server->Events());
+				dvb::HostApi::Init(g_server->Tools(), g_server->Events(), DEVBENCH_BUILD_NUMBER);
 				g_server->Start();
 				dvb::InstallGameEvents(g_server->Events());
 				dvb::StallWatchdog::Start(g_server->Events(), cfg.stallWatchdogMs);

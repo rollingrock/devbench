@@ -151,7 +151,8 @@ exactly like a no-op.
   fire-and-forget.
 - **GPU stage timers** (per-pass GPU+CPU ms) are not ported. They need instrumentation
   points, which means exposing them through the cross-plugin C-ABI so a mod can bracket
-  its own passes — and that ABI is Skyrim-typed today.
+  its own passes. The ABI is no longer the blocker (it works on Fallout now); the
+  instrumentation points still have to be designed.
 - **`rendertarget` covers 2D colour targets only.** No depth/stencil, no cube maps. Target
   *names* are not reported: Fallout addresses targets by logical id through
   RenderTargetManager's remap table, a different index space from the physical slots
@@ -165,8 +166,48 @@ exactly like a no-op.
   image offset, since the VR address library does not cover that id. It is
   plausibility-gated and returns `-1` rather than a wrong number; `-1` costs
   `inspect kind='health'` its hung-vs-busy discrimination and nothing else.
-- **The cross-plugin C-ABI (`DevBenchAPI.h`) is Skyrim-typed.** A Fallout mod cannot
-  register its own tools yet. The ABI is game-neutral; only the discovery handshake is not.
+- ~~**The cross-plugin C-ABI (`DevBenchAPI.h`) is Skyrim-typed.**~~ **Closed** — see
+  "Registering your own tools" below. Builds on both platforms and is compile-checked by
+  the extender-free unit-test target; **no live consumer has exercised it on Fallout yet.**
+
+## Registering your own tools
+
+Another F4SE plugin can add its own tools to this bench, so a mod's own operations show up
+as MCP tools and REST endpoints next to the built-in ones. Vendor `include/DevBenchAPI.h`
+and `include/DevBenchAPI.cpp` into your plugin (both MIT, independent of devbench's
+GPL-3.0), then, once F4SE has sent your plugin `kPostLoad`:
+
+```cpp
+#include "DevBenchAPI.h"
+
+if (auto* api = DevBenchAPI::GetDevBenchInterface001()) {
+    api->RegisterTool("scope",
+        R"({"description":"Read and drive the scope render.",
+            "inputSchema":{"type":"object",
+              "properties":{"action":{"type":"string","enum":["state","force"]}}}})",
+        +[](void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write) {
+            a_write(a_sink, R"({"ok":true})");
+        },
+        nullptr);
+}
+```
+
+`DevBenchAPI.cpp` picks SKSE or F4SE automatically from whichever extender header your
+include path can see; define `DEVBENCHAPI_GAME_FALLOUT4` (or `..._SKYRIM`) to force it.
+Nothing else about the ABI differs between games — the same header, message id and vtable
+serve both.
+
+Two things that bite:
+
+- **Your handler runs on devbench's listener thread, not the main game thread.** Marshal
+  yourself before touching game state. This is unchanged from Skyrim, and it is the single
+  most common way a registered tool crashes a game.
+- **Check `GetBuildNumber()` before calling a late vtable slot.** `RegisterMenuHandler`
+  needs `>= 10400`, `RegisterToolExtension` `>= 10500`. Calling a slot an older host does
+  not have is not a graceful failure.
+
+Registrations are visible at runtime through `inspect kind='registrants'`, which lists both
+who requested the interface and what they registered through it.
 
 ## Safety
 

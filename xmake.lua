@@ -159,12 +159,21 @@ set_kind("binary")
 set_default(false)
 set_languages("c++23")
 add_packages("nlohmann_json", "stb")
-add_includedirs("src")
+-- "include" is on the path for src/core/HostApi.cpp's DevBenchAPI.h, added below.
+add_includedirs("src", "include")
 add_files("tests/*.cpp")
 add_files("src/core/ToolRegistry.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/Ssim.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/gfx/Format.cpp") -- the DXGI decoder + the NaN blind-spot regression
 add_files("src/core/Host.cpp", "src/core/Log.cpp") -- the platform seam, stubbed by tests/pch.h
+-- Compiled here purely as an INVARIANT CHECK, not because the suite exercises it:
+-- this target links neither SKSE nor F4SE, so if HostApi.cpp (the cross-plugin C-ABI
+-- provider) or the DevBenchAPI.h it includes ever regains a script-extender
+-- dependency, this build breaks instead of quietly re-coupling the core to Skyrim.
+-- That coupling is what the multigame split removed, and its return would otherwise
+-- be invisible: both real plugin targets have an extender on the include path via
+-- their PCH, so both would keep compiling.
+add_files("src/core/HostApi.cpp", "src/core/ToolExtensions.cpp")
 add_headerfiles("tests/*.h")
 set_pcxxheader("tests/pch.h")
 add_defines("_WINSOCKAPI_")

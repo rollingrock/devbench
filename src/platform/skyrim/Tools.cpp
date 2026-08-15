@@ -5,7 +5,7 @@
 #include "core/EventBus.h"
 #include "GameEvents.h"
 #include "core/GameState.h"
-#include "HostApi.h"
+#include "core/HostApi.h"
 #include "core/Json.h"
 #include "core/MainThread.h"
 #include "Papyrus.h"

@@ -2,6 +2,7 @@
 
 #include "core/Config.h"
 #include "core/GameState.h"
+#include "core/HostApi.h"
 #include "core/Server.h"
 #include "core/tools/CommonTools.h"
 #include "core/tools/GfxTools.h"
@@ -71,7 +72,24 @@ namespace
 		// tools are advertised here. A platform without that seam must not register them.
 		dvb::tools::RegisterGfxTools(g_server->Tools(), g_server->Events());
 		dvb::RegisterGameTools(g_server->Tools(), g_server->Events());
+		// Cross-plugin C-ABI: wire the provider to this host's registry + bus BEFORE
+		// Start(), so a consumer that registers a tool the instant it gets the interface
+		// finds a live registry rather than racing the server's first request.
+		dvb::HostApi::Init(g_server->Tools(), g_server->Events(), DEVBENCH_BUILD_NUMBER);
 		g_server->Start();
+	}
+
+	// Listener for messages from ANY plugin. The default MessageHandler is registered
+	// with sender "F4SE" and therefore only receives F4SE's own messages, so a consumer
+	// mod's interface dispatch would never reach us without this second registration.
+	//
+	// A default-constructed zstring is a string_view with data() == nullptr, which is how
+	// "any sender" is spelled at the F4SE plugin-manager boundary. It is NOT written as
+	// zstring{nullptr}: constructing a string_view from a null pointer runs strlen on it.
+	void OnInterfaceMessage(F4SE::MessagingInterface::Message* a_msg)
+	{
+		if (a_msg)
+			dvb::HostApi::OnInterfaceRequest(a_msg->type, a_msg->data, a_msg->sender);
 	}
 
 	void MessageHandler(F4SE::MessagingInterface::Message* a_msg)
@@ -120,8 +138,16 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	logs::info("devbench {} loading — {} v{}.{}.{}", DEVBENCH_VERSION_STRING,
 		REL::Module::IsVR() ? "Fallout 4 VR" : "Fallout 4", runtime[0], runtime[1], runtime[2]);
 
-	if (auto* messaging = F4SE::GetMessagingInterface())
+	if (auto* messaging = F4SE::GetMessagingInterface()) {
 		messaging->RegisterListener(MessageHandler);
+		// Second listener, any sender, for cross-plugin interface requests. Registered
+		// at load — before any consumer's kPostLoad — because the dispatch that fetches
+		// the interface is answered INLINE by whatever listeners exist at that moment;
+		// registering later would silently hand back nothing to an early consumer.
+		if (!messaging->RegisterListener(OnInterfaceMessage, F4SE::stl::zstring{}))
+			logs::warn("devbench: could not listen for cross-plugin interface requests — "
+					   "other plugins will not be able to register tools");
+	}
 
 	return true;
 }
