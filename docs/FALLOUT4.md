@@ -54,8 +54,54 @@ Reachable over both MCP (`tools/call` on `/mcp`) and REST (`POST /api/tool/<name
 | `console` | Runs a console command on the main thread. **Fire-and-forget:** command output is not captured on Fallout yet, and the result says so rather than returning an empty line list. |
 | `memory` | Read / resolve / write process memory by address expression. See below. |
 | `log` | `action='tail'` (default) returns the last N lines of a plugin log from `Documents/My Games/Fallout4[VR]/F4SE/`, optional `grep` substring; `action='list'` enumerates them. Any plugin's log, not just devbench's. |
+| `rendertarget` | `action='list'` every render target the engine owns; `'stats'` copies one back and reports `{ nonFinitePct, darkPct, meanLuma, maxChannel }`; `'dump'` also writes a BMP. See below. |
+| `measure` | Frame-time percentiles over a window: `{ fps, meanMs, minMs, p50Ms, p95Ms, p99Ms, maxMs, frames, missedTransitions }`. No engine hook. |
 
-`memory` and `log` are game-agnostic and behave identically on the Skyrim build.
+`memory`, `log`, `rendertarget` and `measure` are game-agnostic — they live in the core and
+work identically on any platform that fills the relevant seam.
+
+## `rendertarget`, the short version
+
+A screenshot shows the final image. This shows the buffers that **produced** it — the
+G-buffer, the light accumulation, the shadow map — which is where a rendering bug actually
+lives.
+
+```powershell
+$rt = "http://127.0.0.1:8930/api/tool/rendertarget"
+irm $rt -Method Post -ContentType application/json -Body '{"action":"list"}'
+irm $rt -Method Post -ContentType application/json -Body '{"action":"stats","index":12}'
+irm $rt -Method Post -ContentType application/json -Body '{"action":"dump","index":12,"label":"before"}'
+```
+
+Dumps land in `Data/F4SE/Plugins/devbench/captures`. `maxDimension` (default 1024, `0` =
+native) integer-downsamples so a 4K buffer stays openable; sampling is nearest-neighbour,
+**not** averaged, because averaging hides the single-pixel artefact you are hunting.
+
+**Read `nonFinitePct` before `darkPct`.** A buffer full of NaN displays as black but reads
+as *bright* to any exponent-threshold test — a NaN's exponent is the largest possible, not
+the smallest. In the investigation this came from, 12,000+ readbacks across five sessions
+all reported "0 dark" against a visibly black screen. The two tests are deliberately
+separate calls and a unit test enforces that they stay separate.
+
+In dumps, **NaN/Inf pixels are painted magenta**, not clamped to white: clamped, a
+NaN-filled buffer looks identical to a legitimately overbright one.
+
+Decodable formats: `R11G11B10_FLOAT`, `R16G16B16A16_FLOAT`, `R8G8B8A8_UNORM(_SRGB)`,
+`B8G8R8A8_UNORM(_SRGB)`, `R16G16_UNORM`. Anything else is reported as `decodable: false`
+by `action='list'` and refused **before** the surface is mapped — an unknown stride is not
+a decode inconvenience, it is an out-of-bounds read.
+
+## `measure`, the short version
+
+```powershell
+irm "http://127.0.0.1:8930/api/tool/measure" -Method Post -ContentType application/json -Body '{"durationMs":5000}'
+```
+
+Takes no engine hook: it watches the engine's frame counter and timestamps each change
+with QPC. Accurate to tens of microseconds, and it busies one core for the window — so
+there is deliberately no background mode. `missedTransitions` tells you whether the
+instrument itself dropped frames, which matters when comparing two runs. On Fallout 4 VR,
+if the frame counter is unavailable this returns a 503 rather than a plausible zero.
 
 ## `memory`, the short version
 
@@ -103,6 +149,14 @@ exactly like a no-op.
 - **Console output capture.** Skyrim fences a command between markers and slices
   `ConsoleLog`'s buffer. The Fallout equivalent is not wired up, so `console` is
   fire-and-forget.
+- **GPU stage timers** (per-pass GPU+CPU ms) are not ported. They need instrumentation
+  points, which means exposing them through the cross-plugin C-ABI so a mod can bracket
+  its own passes — and that ABI is Skyrim-typed today.
+- **`rendertarget` covers 2D colour targets only.** No depth/stencil, no cube maps. Target
+  *names* are not reported: Fallout addresses targets by logical id through
+  RenderTargetManager's remap table, a different index space from the physical slots
+  enumerated here, and printing a name that might belong to a different buffer is worse
+  than printing none.
 - **`record` / `replay` / `scenario` / `capture` / `game` / `papyrus` / `menu`** are
   Skyrim-only so far. They are mostly pure logic around a few engine calls
   (`Recording.cpp` is 1014 lines with 11 game references), so porting them is bounded

@@ -4,6 +4,7 @@
 #include "core/GameState.h"
 #include "core/Server.h"
 #include "core/tools/CommonTools.h"
+#include "core/tools/GfxTools.h"
 
 #include "Version.h"
 
@@ -66,6 +67,9 @@ namespace
 		// Tools are registered BEFORE Start() so they appear on both transports from
 		// the very first request rather than racing a client that connects instantly.
 		dvb::tools::RegisterCommonTools(g_server->Tools(), g_server->Events());
+		// Fallout implements the graphics seam (Device_Fallout4.cpp), so the graphics
+		// tools are advertised here. A platform without that seam must not register them.
+		dvb::tools::RegisterGfxTools(g_server->Tools(), g_server->Events());
 		dvb::RegisterGameTools(g_server->Tools(), g_server->Events());
 		g_server->Start();
 	}

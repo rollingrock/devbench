@@ -153,34 +153,85 @@ agent can make unattended. Four decisions in it are worth keeping in any review:
 
 Not just devbench's. The mod being debugged is usually not devbench.
 
-### Still to bring over (not in this branch)
+### `rendertarget` — look inside the renderer
 
-The Fallout bench also carries a **D3D11 graphics-debug** toolkit that has no equivalent
-upstream and is, on inspection, almost entirely game-agnostic:
+The capability with no equivalent upstream, and the one that is genuinely hard to
+rebuild from scratch. A screenshot shows the final image; this shows the buffers that
+*produced* it — the G-buffer, the light accumulation, the shadow map — which is where a
+rendering bug actually lives.
 
-- GPU timestamp-query **stage timers** (per-stage GPU *and* CPU ms, disjoint-discard
-  handling) — this is what a shader A/B actually needs, and it complements record/replay
-  exactly: replay gives you the same scene twice, stage timers tell you what changed.
-- **Render-target readback and full-surface dumps** with a multi-format decoder
-  (`R16G16_UNORM`, `R11G11B10`, F16 — the formats a G-buffer actually uses), plus
-  per-buffer NaN percentage and NaN-highlighting output.
-- `PixelNonFinite` / `PixelDark` classification. The lesson embedded in that pair is the
-  one worth transplanting: a "dark pixel" test that checks `exponent < 12` classifies NaN
-  as *bright*, which is why 12,000 readbacks across five sessions all reported "0 dark"
-  while the screen was visibly black.
+```
+rendertarget action='list'                          -> every live target: index, size, format, decodable
+rendertarget action='stats' index=12                -> nonFinitePct, darkPct, meanLuma, maxChannel
+rendertarget action='dump'  index=12 label='before' -> the same, plus a BMP on disk
+```
 
-Given `Ssim.cpp` and the golden-image replay work already upstream, the natural join is:
-**replay puts the camera in the same place, capture+SSIM says the image changed, stage
-timers and buffer dumps say why.** That is a full shader-regression loop and neither half
-has it alone.
+The platform seam it sits on is three functions (`core/gfx/Device.h`): device, context,
+and "enumerate the targets the renderer owns, by engine index". Everything else —
+readback, decode, analysis, dumping — is game-agnostic. Skyrim can have this by writing
+those three functions.
+
+Four decisions in it are load-bearing, each paid for:
+
+1. **`IsNonFinite` and `IsDark` are separate calls, and a test enforces it.** A NaN
+   displays black but has the *largest possible* exponent, so an exponent-threshold
+   "is it dark" test classifies NaN as **bright**. That is not a hypothetical: 12,000+
+   readbacks across five sessions all reported "0 dark" against a visibly black screen,
+   and nine innocent suspects were eliminated against that blind instrument.
+   `tests/Format_test.cpp` asserts the trap — `IsDark` must *not* catch NaN — so the two
+   can never be helpfully merged back together.
+2. **Non-finite pixels are painted MAGENTA in dumps, not clamped to white.** Clamped, a
+   NaN-filled buffer is indistinguishable from a legitimately overbright one; the first
+   dump session read as "blown out" for exactly that reason.
+3. **An unknown DXGI format is refused before anything is mapped.** The original had a
+   catch-all that assumed 8 bytes per pixel, so a 4-byte surface was read at twice its
+   row length and ran off the end of the mapped staging texture. That crash was blamed on
+   an unrelated render step for a session.
+4. **Downsampling is nearest-neighbour, never averaged.** Averaging hides the
+   single-pixel NaN and the one-pixel seam that are the reason you are looking.
+
+Also landed: `R16G16_UNORM` decode (the G-buffer normals format), which had no case in the
+original table — so that buffer was silently skipped and had never once been looked at.
+It renders as R=x, G=y, B=0 with no reconstructed Z, because guessing the encoding
+produces a plausible image that lies.
+
+### `measure` — frame-time percentiles, no hook
+
+`{ fps, meanMs, minMs, p50Ms, p95Ms, p99Ms, maxMs, frames, missedTransitions }` over a
+window. This is the ROADMAP's "**`measure` primitive** — sample frametime over a window →
+min/avg/p95/p99 (the benchmark primitive)", and it needs **no engine hook**: it watches
+the frame counter the platform already exposes and timestamps each change with QPC.
+
+It reports its own limitations rather than hiding them — `missedTransitions` when the
+counter jumped by more than one, the sampling method in every result, and a 503 (not a
+silent zero) on a runtime with no frame counter. It busies one core for the window, so
+there is deliberately no background mode.
+
+**Together with what is already upstream, that closes the loop:** `replay` puts the camera
+in the same place, `capture` + `Ssim` says the image changed, `measure` says what it cost,
+and `rendertarget` says which buffer went wrong. No half of that is a regression harness
+on its own.
+
+### Still to bring over
+
+- **GPU timestamp stage timers** — per-stage GPU *and* CPU ms with disjoint handling.
+  Deferred deliberately: it needs instrumentation points, which means exposing it through
+  the C-ABI so a mod can bracket its own passes — and the C-ABI is Skyrim-typed today
+  (see §7). A `gputimer` tool with nothing registered would be vaporware.
+- **Depth/stencil and cube targets.** Only 2D colour targets are enumerated.
+- **Named targets on Fallout.** The engine addresses targets by *logical* id through
+  RenderTargetManager's remap table, a different index space from the physical slots.
+  `TargetName()` returns "" rather than a name that might belong to a different buffer.
 
 ## 5. What is unverified
 
 Stated plainly, because a branch that claims more than it has tested is worse than one
 that claims less:
 
-- ✅ **The Fallout 4 target configures, compiles and links.** `devbench.dll` exports
-  `F4SEPlugin_Query` / `F4SEPlugin_Load`.
+- ✅ **The Fallout 4 target configures, compiles and links** at `/W4` with zero warnings.
+  `devbench.dll` exports `F4SEPlugin_Query` / `F4SEPlugin_Load`.
+- ✅ **The format decoder is unit-tested** — 8 cases, all passing, including the NaN
+  blind-spot regression.
 - ❌ **The Fallout plugin has not been loaded in the game.** No endpoint has answered a
   live request.
 - ❌ **The Skyrim xmake target has not been built since the move.** The change is
@@ -194,6 +245,12 @@ that claims less:
   flat-rim path is address-library backed and fine.
 - ⚠️ **Fallout `console` output capture** is not implemented (Skyrim's fencing trick has no
   wired-up equivalent yet). The tool says so in its own description.
+- ⚠️ **The renderer struct offsets have not been confirmed against a running game.** They
+  agree from two independent directions (CommonLibF4's flat-rim layout, and a live
+  x64dbg measurement on VR — `0x10 + 0x0A58 + 0x10 == 0xA78` exactly), and
+  `Device_Fallout4.cpp` validates the device, the context and a sample of the target
+  array before publishing anything, returning null rather than a plausible wrong
+  pointer. But agreement is not the same as a live `rendertarget action='list'`.
 
 ## 6. Suggested review order
 
@@ -217,6 +274,8 @@ that claims less:
   `devbench-api` is already a port. Argument against: one repo is exactly what stops the
   divergence this branch exists to prevent. Recommendation is to stay one repo until a
   third game actually lands.
-- **Does the graphics toolkit (§4) belong in the core, or in an optional module?** It
-  drags in D3D11. Leaning: core, behind a capability flag — the Skyrim shader work wants
-  it too.
+- **Should the graphics tools be conditional?** They are in the core and registered only
+  by a platform that implements `core/gfx/Device.h` — Fallout does, Skyrim does not yet,
+  and an unimplemented platform simply does not advertise them (better than tools that
+  always answer 503). Skyrim gets them by writing three functions. The alternative — an
+  optional module — buys little, since D3D11 is a system library.
