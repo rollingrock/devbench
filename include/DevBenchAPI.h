@@ -60,9 +60,20 @@ namespace DevBenchAPI
 	};
 
 	struct IDevBenchInterface001;
-	// Call only after your extender has sent kPostLoad. Returns nullptr if devbench is
-	// absent. Defined in DevBenchAPI.cpp, which is the only extender-aware part of this
-	// ABI: it compiles against SKSE or F4SE (auto-detected, overridable — see that file).
+	// WHEN TO CALL THIS:
+	//   Skyrim  — from your kDataLoaded handler (devbench sets itself up at kPostLoad).
+	//   Fallout — from your kPostPostLoad handler. NOT kPostLoad: devbench does its own
+	//             setup at kPostLoad, and F4SE runs every plugin's kPostLoad handler in
+	//             plugin LOAD ORDER, so a consumer sorting before devbench would ask
+	//             before the provider exists and get nullptr. kPostPostLoad is dispatched
+	//             immediately after kPostLoad and exists precisely for this second phase.
+	//
+	// Returns nullptr if devbench is absent — normal, not an error: devbench is a
+	// development dependency and must never become a load-order requirement. The result
+	// is cached only on success, so a nullptr result is safe to retry at a later message.
+	//
+	// Defined in DevBenchAPI.cpp, which is the only extender-aware part of this ABI:
+	// it compiles against SKSE or F4SE (auto-detected, overridable — see that file).
 	IDevBenchInterface001* GetDevBenchInterface001();
 
 	struct IDevBenchInterface001
