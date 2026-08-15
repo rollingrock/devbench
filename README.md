@@ -9,6 +9,17 @@ and REST adapters _reflect_ it, so a tool registered once is reachable over both
 automatically. Other SKSE mods register their own tools through a small C ABI, turning
 devbench into a shared bench rather than a per-mod server.
 
+> **This branch (`feat/multigame-core`) splits the game-agnostic core out of the Skyrim
+> plugin and adds a Fallout 4 / Fallout 4 VR platform on top of it.** The layout is now
+> `src/core/` (which includes no script-extender header) + `src/platform/<game>/`. Read
+> **[docs/MULTIGAME.md](docs/MULTIGAME.md)** first: it has the measurement the split was
+> based on, the three seams a game has to fill, what the Fallout side brings back (a
+> `memory` tool that reads and pokes process memory by address expression), and an honest
+> list of what is not yet verified. Fallout-specific usage is in
+> **[docs/FALLOUT4.md](docs/FALLOUT4.md)**.
+>
+> Everything below describes the Skyrim plugin and is unchanged by the split.
+
 ## What devbench does for developers
 
 devbench lets an **AI agent, a test script, or CI drive and measure a running Skyrim** — no
