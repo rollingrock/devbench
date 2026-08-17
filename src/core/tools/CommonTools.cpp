@@ -210,7 +210,30 @@ namespace dvb::tools
 				if (!mem::SafeRead(reinterpret_cast<const void*>(va), buf, n))
 					throw ToolError(400, "memory: read faulted at " + Hex(va));
 				buf[n] = '\0';
-				out["value"] = std::string(buf);
+
+				// Stop at the terminator, then ESCAPE anything that is not printable
+				// ASCII. Handing raw bytes straight to json made this type unusable for
+				// its entire purpose: nlohmann refuses to serialise invalid UTF-8 and
+				// throws, so probing an address that turned out NOT to be a string
+				// answered 500 — the one answer that cannot be distinguished from the
+				// server being broken. A probe must be able to say "that is not text".
+				const std::string_view raw{ buf, std::strlen(buf) };
+				std::string            value;
+				value.reserve(raw.size());
+				std::size_t printable = 0;
+				for (const unsigned char c : raw) {
+					if (c == '\t' || c == '\n' || c == '\r' || (c >= 0x20 && c <= 0x7E)) {
+						value += static_cast<char>(c);
+						++printable;
+					} else {
+						value += std::format("\\x{:02X}", c);
+					}
+				}
+				out["value"] = value;
+				out["length"] = raw.size();
+				// Lets a caller filter on "is this actually text" without re-deriving it
+				// from escapes, which is the check every scan over unknown memory wants.
+				out["printable"] = raw.empty() ? false : (printable == raw.size());
 				return out;
 			}
 
@@ -324,7 +347,10 @@ namespace dvb::tools
 				"RVA is reported ONLY for addresses inside the image, so a heap pointer cannot be "
 				"mistaken for one. action='read' (default) returns 'count' values of 'type' "
 				"(u8|u16|u32|u64|i32|i64|f32|f64|ptr|bytes|cstr; count capped at 4096, and 'capped' "
-				"says so). NaN/Inf come back as the strings \"NaN\"/\"Inf\", never as null. "
+				"says so). NaN/Inf come back as the strings \"NaN\"/\"Inf\", never as null. 'cstr' "
+				"returns { value, length, printable } with non-printable bytes escaped as \\xNN, so "
+				"probing an address that turns out NOT to hold text answers 'printable: false' "
+				"rather than failing — a scan over unknown memory needs that to be a readable answer. "
 				"action='write' needs confirm=true AND allowMemoryWrites=true in config.json, and "
 				"echoes { before, after, held } so you have an undo and can tell a write that stuck "
 				"from one the engine overwrote. Every access is SEH-guarded: a bad address is a 400 "

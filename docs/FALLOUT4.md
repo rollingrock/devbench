@@ -124,6 +124,14 @@ irm "http://127.0.0.1:8930/api/tool/memory" -Method Post -Body '{"addr":"[base+0
 Types: `u8 u16 u32 u64 i32 i64 f32 f64 ptr bytes cstr`. `count` is capped at 4096 and the
 response says `capped: true` when it was — never a silent truncation.
 
+`cstr` returns `{ value, length, printable }`, with non-printable bytes escaped as `\xNN`.
+That shape exists because of a real bug (fixed 2026-08-17): it used to hand the raw bytes
+to the JSON serialiser, which **refuses invalid UTF-8 and throws**, so probing an address
+that turned out *not* to hold text answered `500` — indistinguishable from the server being
+broken, and silently fatal to any scan that walks unknown memory looking for strings. One
+did exactly that and reported "no text found" everywhere. `printable: false` is now the
+answer to "that is not a string", and it is an answer, not a failure.
+
 Things it is careful about, because each one cost somebody a session:
 
 - **A bad address is a `400` naming the faulting address**, not a crash and not a bare
