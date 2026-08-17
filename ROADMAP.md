@@ -59,6 +59,42 @@ automated new-game → in-world flows stall on a popup.
 - Not yet reversed: other modal menus (`RaceSex Menu`, alternate-start) need their own
   callback/button RE.
 
+**Ported to Fallout 4 / Fallout 4 VR** (`src/platform/fallout4/GameEvents_Fallout4.{h,cpp}` +
+the `menu` tool in `Tools_Fallout4.cpp`), for the exact same failure shape found independently
+in the fallout4-scope-in-scope-investigation repo: a save with missing masters pops the
+engine's own "this save relies on content that is no longer present… Continue Loading?" modal,
+which every other signal (frame count, `pendingTasks`, `playerLoaded`) reads as healthy while it
+silently no-ops `coc` and other state-machine commands (`DEVBENCH_REQ_MENU_STATE.md` in that
+repo). Same action names/result keys as the Skyrim `menu` tool above, with two API-shape
+differences CommonLibF4 forced: `BSTEventSink::ProcessEvent` takes the event by `const&`, not
+`const*`; and there is no `MessageBoxMenu::GetCurrentMessageBoxData()` /
+`MessageBoxMenu::SelectOption()` convenience pair to mirror, so `describe`/`accept` read/answer
+`MessageBoxMenu::currentMessage` directly (its `callback` kept alive via its own
+`BSTSmartPointer` across the `kHide`). Also added — and this is the part Skyrim's version
+doesn't have — `inspect kind='health'`/`kind='ui'` expose a `blocking` boolean off the same
+main-thread-independent signal as `health`, so a caller already polling `health` gets the modal
+warning for free, and `console`'s result gets a `blocked` flag for the same reason.
+
+**✅ LIVE-TESTED 2026-08-17 on Fallout 4 VR, headless.** The acceptance test in that repo's
+`DEVBENCH_REQ_MENU_STATE.md` passes end to end, and so does the optional recovery: modal
+summoned → `describe` returns its text and `["$Yes","$No"]` → `accept` → `blocking` clears →
+`coc` moves the player again. **Every part that shipped "built and linked clean at `/W4`" was
+broken in a way only running it could show**, which is the entry worth keeping:
+
+| what the field test found | why a compiler could never see it |
+|---|---|
+| `RE::UI` is **null at `kPostLoad`** on FO4VR, so the sink was never installed — it reported an empty menu set straight through a `LoadingMenu` | `if (auto* ui = …)` swallowed it, and the code comment asserted the opposite ("RE::UI is up well before kPostLoad") |
+| `MessageBoxMenu::currentMessage` is at **`+0xF8`** on VR, not `+0xE8` — `describe` **crashed the game** | a flat-rim header compiles perfectly against a VR binary |
+| `memory`'s `cstr` type **500s on any non-UTF-8 bytes** (core bug, affects every game) | nlohmann throws at serialise time, not compile time |
+
+Two design changes came out of it, both about the instrument rather than the feature.
+Open-menu answers now read `RE::UI::menuMap` under the engine's own read lock — ground truth,
+still no main-thread hop, and correct for menus that opened before devbench subscribed — and
+report a `source` field so `blocking: false` can be told apart from nothing-is-tracking. And
+`describe`/`accept` identify `MessageBoxData` by *content*, report which `currentMessageOffset`
+matched, and return a hex dump instead of dereferencing an offset that has not validated.
+Detail in `docs/FALLOUT4.md`.
+
 ## Milestone: Community Shaders parity → deprecate the built-in MCP server — **DONE (Open Shaders PR #66)**
 
 End state reached: Open Shaders no longer embeds its own MCP server — cpp-mcp + the `RemoteControl`

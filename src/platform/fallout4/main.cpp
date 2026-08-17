@@ -1,3 +1,4 @@
+#include "GameEvents_Fallout4.h"
 #include "Tools_Fallout4.h"
 
 #include "core/Config.h"
@@ -81,6 +82,15 @@ namespace
 		// finds a live registry rather than racing the server's first request.
 		dvb::HostApi::Init(g_server->Tools(), g_server->Events(), DEVBENCH_BUILD_NUMBER);
 		g_server->Start();
+		// Try here so the "menu" event stream starts as early as it can, but do NOT
+		// assume it succeeds: RE::UI is NOT up at kPostLoad on FO4VR. The first version
+		// of this asserted it was, swallowed the null, and shipped a detector that
+		// reported an empty menu set through a cell transition — see the retry at
+		// kGameDataReady below. (Same shape as the Skyrim platform's kInputLoaded note:
+		// BSInputDeviceManager is null at kPostLoad and registering then silently
+		// no-ops.) The open-menu ANSWERS do not depend on this — they read
+		// RE::UI::menuMap directly — so a false here costs events, not correctness.
+		dvb::InstallGameEvents(g_server->Events());
 	}
 
 	// Listener for messages from ANY plugin. The default MessageHandler is registered
@@ -169,6 +179,17 @@ namespace
 			RegisterAnySenderListener("kPostLoad");
 			StartServer();
 		}
+
+		// Retry the menu-event sink once the engine is actually up. RE::UI is null at
+		// kPostLoad, so the attempt in StartServer() is best-effort; kGameDataReady and
+		// kGameLoaded both arrive on this install (~12 s later, per the message log
+		// above) and RE::UI is live by then. InstallGameEvents is idempotent, so calling
+		// on both is free — whichever lands first wins, and if neither does, the
+		// menuMap-backed answers are still correct; only the "menu" event stream is lost.
+		if (g_server &&
+			(a_msg->type == F4SE::MessagingInterface::kGameDataReady ||
+				a_msg->type == F4SE::MessagingInterface::kGameLoaded))
+			dvb::InstallGameEvents(g_server->Events());
 	}
 }
 

@@ -50,8 +50,9 @@ Reachable over both MCP (`tools/call` on `/mcp`) and REST (`POST /api/tool/<name
 | Tool | What it does |
 | --- | --- |
 | `ping` | Self-test. Returns `{ ok, game, exe, vr }`. |
-| `inspect` | Live game state, on the main thread, returned synchronously. `kind='state'` → `{ plugin, version, playerLoaded, frame, pid, port, exe, vr, game, extender }`. `'health'` → the same identity plus `{ frame, lastTaskFrame, pendingTasks }`, and it is the **only** kind answered *without* the main thread — so it still replies when a busy or hung main thread would 504. `'scene'` → `{ position, cell, cellFormId, interior, worldspace?, gameHour, daysPassed }`. `'player'` → `{ formId, level, name }`. |
-| `console` | Runs a console command on the main thread. **Fire-and-forget:** command output is not captured on Fallout yet, and the result says so rather than returning an empty line list. |
+| `inspect` | Live game state, on the main thread, returned synchronously. `kind='state'` → `{ plugin, version, playerLoaded, frame, pid, port, exe, vr, game, extender }`. `'health'` → the same identity plus `{ frame, lastTaskFrame, pendingTasks, blocking }`, and it is the **only** kind answered *without* the main thread — so it still replies when a busy or hung main thread would 504. `'ui'` → `{ openMenus, messageBoxOpen, blocking }`, **also** answered without the main thread, for the same reason: `blocking` has to be trustworthy exactly when the game is stuck behind a modal, not just when it's healthy. `'scene'` → `{ position, cell, cellFormId, interior, worldspace?, gameHour, daysPassed }`. `'player'` → `{ formId, level, name }`. |
+| `console` | Runs a console command on the main thread. **Fire-and-forget:** command output is not captured on Fallout yet, and the result says so rather than returning an empty line list. Also reports `blocked` — true if a modal was open when the command was submitted, since many state-machine commands (`coc`, …) silently no-op behind one instead of erroring. |
+| `menu` | Detect and answer in-game menus — mirrors the Skyrim `menu` tool's shape. `action='list'` (default) → `{ openMenus, messageBoxOpen }`. `'describe'` → the active `MessageBoxMenu`'s `{ headerText, bodyText, buttons, modal }`. `'accept'` (`index`, default 0) → answers it by button index and closes it. `'open'`/`'close'` (`name`) → show/hide an engine menu via the UI message queue. |
 | `memory` | Read / resolve / write process memory by address expression. See below. |
 | `log` | `action='tail'` (default) returns the last N lines of a plugin log from `Documents/My Games/Fallout4[VR]/F4SE/`, optional `grep` substring; `action='list'` enumerates them. Any plugin's log, not just devbench's. |
 | `rendertarget` | `action='list'` every render target the engine owns; `'stats'` copies one back and reports `{ nonFinitePct, darkPct, meanLuma, maxChannel }`; `'dump'` also writes a BMP. See below. |
@@ -166,10 +167,37 @@ exactly like a no-op.
   RenderTargetManager's remap table, a different index space from the physical slots
   enumerated here, and printing a name that might belong to a different buffer is worse
   than printing none.
-- **`record` / `replay` / `scenario` / `capture` / `game` / `papyrus` / `menu`** are
-  Skyrim-only so far. They are mostly pure logic around a few engine calls
-  (`Recording.cpp` is 1014 lines with 11 game references), so porting them is bounded
-  work, not a rewrite.
+- **`record` / `replay` / `scenario` / `capture` / `game` / `papyrus`** are Skyrim-only
+  so far. They are mostly pure logic around a few engine calls (`Recording.cpp` is 1014
+  lines with 11 game references), so porting them is bounded work, not a rewrite.
+- **`menu` and the `ui`/`blocking` fields on `inspect` are LIVE-TESTED on Fallout 4 VR
+  (2026-08-17).** Detection, `console.blocked`, `describe` and `accept` all confirmed in
+  a running game, including the whole recovery: summon the missing-masters modal →
+  `describe` reads its text and buttons → `accept` → `blocking` clears → `coc` moves the
+  player again. Two engine facts it cost, worth not rediscovering:
+  - **`RE::UI` is NULL at `kPostLoad` on FO4VR.** Registering a `MenuOpenCloseEvent`
+    sink there silently does nothing: no error, no log line, and every later "is a menu
+    open" answer is a confident empty set — it reported no menus through a cell
+    transition that certainly opened a `LoadingMenu`. `kGameDataReady` (~7 s later on
+    this install) works, and `InstallGameEvents` is idempotent so both are called. Same
+    species as the Skyrim platform's `BSInputDeviceManager`-at-`kPostLoad` note, which
+    was already written down ten lines from the code that assumed the opposite. The
+    open-menu *answers* no longer depend on the sink at all — they read
+    `RE::UI::menuMap` under the engine's own `GetMenuMapRWLock()`, which is ground truth,
+    still needs no main-thread hop, and is correct for menus that opened before devbench
+    subscribed. `source` in the result says which one answered, so a `false` can be told
+    apart from a blind instrument.
+  - **`MessageBoxMenu::currentMessage` is at `+0xF8` on VR, not CommonLibF4's `+0xE8`**
+    (a 0x10 base-class shift). `MessageBoxData`'s *own* layout is byte-identical on both
+    binaries — `headerText` `+0x18`, `bodyText` `+0x28`, `buttonText` `+0x38` (a
+    `BSTArray`: `capacity` at `+0x08`, **`size` at `+0x10`**, since `sizeof(BSTArray)` is
+    0x18), `warningContext` `+0x50`, `callback` `+0x58`, `modal` `+0x64`. The wrong
+    offset points at a run of small integers with no vtable, and dereferencing it took
+    the process down. So `describe`/`accept` try both offsets, identify the winner by
+    *content* (a vtable **and** a `bodyText` that reads as text), report which matched in
+    `currentMessageOffset`, and on failure return a hex dump rather than crashing —
+    a wrong offset here yields plausible-looking qwords, exactly as `core/gfx/Validate.h`
+    warns for the render-target seam.
 - **`game::CurrentFrame()` on VR** reads `BSGraphics::State::frameCount` at a measured
   image offset, since the VR address library does not cover that id. It is
   plausibility-gated and returns `-1` rather than a wrong number; `-1` costs
