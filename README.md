@@ -359,6 +359,20 @@ needed. Pass a `"description"` in the descriptor; it's shown inline. For menus,
 `registered`; `menu open` on a registered name returns a 400 pointing you at `invoke`. Opening/closing/
 listing engine menus already works generically — only custom interaction/data needs a handler.
 
+**Only extend a base tool whose name already means what you're adding — or a cold agent won't find it.**
+An LLM client triaging a long tool list reads a tool's existing summary as its whole story before
+reading the full schema. A/B-tested with two cold subagents (same task, same target mod, no other
+context): one build exposed a settings-command/query dispatcher as its own top-level tool
+(`yourmod.actions`); the other bolted the identical dispatcher onto `menu` via new `op` values
+(`op:"invokeCommand"`, alongside the existing `open`/`close`/`toggle`). The agent given the separate
+tool found it immediately and used it correctly. The agent given the merged `menu` tool never tried
+it — `menu`'s summary reads "open/close/toggle a window," so the agent judged it irrelevant to a
+settings task and moved on, missing the extra `op` values entirely even though they were fully
+present in the schema — then fell back to hand-deriving raw state to accomplish the task, the exact
+fragile path the dispatcher existed to avoid. `RegisterToolExtension` keeps the top-level list short,
+but that's not free if the extension's job doesn't semantically match the base tool it hides under —
+register a new top-level tool instead when it doesn't.
+
 ### Design your tools the agentic-renderdoc way
 
 devbench follows the **[agentic-renderdoc](https://github.com/EdenLabs/agentic-renderdoc#why-this-design)**
