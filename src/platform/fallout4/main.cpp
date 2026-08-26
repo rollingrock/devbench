@@ -14,6 +14,14 @@
 #include <set>
 #include <spdlog/sinks/basic_file_sink.h>
 
+// Load-order-proof interface entry (see HostApi::GetApiEntry). A consumer does
+// GetModuleHandle("devbench.dll") + GetProcAddress("DevBench_GetApiFunction"),
+// calls it, and receives the same GetApi the message handshake would deliver.
+extern "C" __declspec(dllexport) void* DevBench_GetApiFunction()
+{
+	return dvb::HostApi::GetApiEntry();
+}
+
 // devbench, Fallout 4 / Fallout 4 VR entry point.
 //
 // One DLL serves both runtimes: CommonLibF4 (rollingrock fork) resolves per-runtime

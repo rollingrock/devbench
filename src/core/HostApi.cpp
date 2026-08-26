@@ -195,6 +195,11 @@ namespace dvb::HostApi
 		RegisterExtensionSelfTests();
 	}
 
+	void* GetApiEntry()
+	{
+		return reinterpret_cast<void*>(&GetApi);
+	}
+
 	void OnInterfaceRequest(std::uint32_t a_type, void* a_data, const char* a_sender)
 	{
 		if (a_type == DevBenchAPI::DevBenchMessage::kMessage_GetInterface && a_data) {

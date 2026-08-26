@@ -31,6 +31,15 @@ namespace dvb
 		// on its include path.
 		void Init(ToolRegistry& a_registry, EventBus& a_events, unsigned int a_buildNumber);
 
+		// Load-order-proof alternative to the messaging handshake: the platform
+		// exports a plain C function that returns this same GetApi pointer, so a
+		// consumer can GetProcAddress its way to the interface when the message
+		// route fails. Field-found 2026-08-26 (FO4VR): the extender's
+		// RegisterListener de-dupes by listener handle, so the kPostLoad
+		// re-register never reaches the slot of a consumer that loaded later -
+		// the dispatch finds zero respondents forever.
+		[[nodiscard]] void* GetApiEntry();
+
 		// Handle a DevBenchMessage::kMessage_GetInterface request. Call from the
 		// platform's message listener for every message — it no-ops unless it is the
 		// request. a_sender may be null.
