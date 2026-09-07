@@ -77,24 +77,14 @@ namespace
 		if (REL::Module::IsVR()) {
 			rendererData = REL::Module::get().base() + kRendererInstanceVR + kRendererDataOffset;
 		} else {
-			// REL::ID(1235449) is a RendererData** — the global holding the pointer. ASK for
-			// it rather than assert it, and for the same reason as CurrentFrame(): the id is
-			// OG-only. It exists in the 1.10.163 address library and in neither 1.10.984 nor
-			// 1.11.240, because CommonLibF4 declares BSGraphics::RendererData::GetSingleton()
-			// with a bare REL::ID as though one id served every runtime.
-			//
-			// The catch(...) this replaces was unreachable: REL::ID::address() funnels into
-			// stl::report_and_fail, which pops a message box and TERMINATES rather than
-			// throwing. Before the IDDB exact-match fix that never showed, because a missing
-			// id silently resolved to its neighbour and SafeRead simply failed on the
-			// resulting junk pointer -- the gate below caught it and the feature degraded, by
-			// luck rather than design. With the id actually checked, the same line takes the
-			// whole game down at plugin load instead.
-			if (const auto offset = REL::IDDB::get().try_id2offset(1235449); offset.has_value()) {
-				const auto     slot = REL::Module::get().base() + *offset;
+			try {
+				// REL::ID(1235449) is a RendererData** — the global holding the pointer.
+				const auto slot = REL::ID(1235449).address();
 				std::uintptr_t p = 0;
 				if (dvb::mem::SafeRead(reinterpret_cast<const void*>(slot), &p, sizeof(p)))
 					rendererData = p;
+			} catch (...) {
+				rendererData = 0;
 			}
 		}
 
