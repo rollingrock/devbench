@@ -70,9 +70,14 @@ namespace dvb::game
 	// devbench takes no per-frame hook by design; this number is what lets
 	// `GET /api/health` tell "main thread busy" from "main thread hung" without one.
 	//
-	// Resolution differs per runtime, and only the flat-rim path is address-library
-	// backed:
-	//   * Fallout 4      REL::ID(600795) — CommonLibF4's BSGraphics::State singleton.
+	// Resolution differs per runtime:
+	//   * Fallout 4      REL::ID(600795), CommonLibF4's BSGraphics::State singleton --
+	//                    but ONLY where the running game's address library actually
+	//                    publishes that id. It does not always. CommonLibF4 declares the
+	//                    singleton with a BARE REL::ID, which asserts one id serves every
+	//                    runtime; 600795 exists only in the 1.10.163 (OG) library and is
+	//                    absent from both 1.10.984 (Next-Gen) and 1.11.240 (Anniversary).
+	//                    So this is asked for, never assumed — see below.
 	//   * Fallout 4 VR   the VR address library does not cover that id, so the state
 	//                    block is taken from its measured image offset. That offset
 	//                    was established in the FO4VR scope investigation and is
@@ -92,11 +97,23 @@ namespace dvb::game
 			if (REL::Module::IsVR()) {
 				state = REL::Module::get().base() + kStateOffsetVR;
 			} else {
-				try {
-					state = REL::ID(600795).address();
-				} catch (...) {
+				// ASK for the id; do not assert it. REL::ID(...).address() is fatal on a
+				// miss -- stl::report_and_fail TERMINATES, it does not throw -- so the
+				// catch(...) this replaces could never have fired. It was not merely
+				// redundant: it read as a handled failure while the real behaviour was
+				// either a hard exit or, before the IDDB fix, a silent wrong address.
+				//
+				// Measured on 1.11.240: id 600795 is absent, std::lower_bound landed on
+				// id 600826 at RVA 0x246E6F8 beside g_HKXFormat, and this function read
+				// Havok data and reported 6,579,565 as the frame count of a process four
+				// seconds old. The plausibility gate below passed it.
+				//
+				// Losing the frame signal on a runtime that does not publish this id is
+				// the correct outcome; the core already handles -1.
+				const auto offset = REL::IDDB::get().try_id2offset(600795);
+				if (!offset.has_value())
 					return nullptr;
-				}
+				state = REL::Module::get().base() + *offset;
 			}
 			if (!state)
 				return nullptr;
