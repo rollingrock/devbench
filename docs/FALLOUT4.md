@@ -8,9 +8,19 @@ The same DLL serves **Fallout 4** and **Fallout 4 VR**. It is the Fallout platfo
 [devbench](../README.md); the tool surface, the transports, and the config file are shared
 with the Skyrim build. See [MULTIGAME.md](MULTIGAME.md) for how the two fit together.
 
-> **Status: builds, not yet run in-game.** The plugin compiles and exports the F4SE entry
-> points; no endpoint has answered a live request yet. Treat the endpoint list below as
-> the intended contract, not as a tested one.
+> **Status: proven on Fallout 4 VR; loads-but-unproven on flat Fallout 4.**
+> On **VR** the plugin runs: `devbench 1.14.0 loading — Fallout 4 VR v1.2.72`,
+> `server on 127.0.0.1:8931 — listening (mcp + rest)`, and it has handed its cross-plugin
+> interface to `truescopes_vr` and `F4VRBody` in a live session.
+> On **flat** nothing had ever run, and the reason was not a bug in devbench: it exported
+> only `F4SEPlugin_Query`, which F4SE 0.7.0 replaced with a declarative `F4SEPlugin_Version`
+> record and which F4SE 0.7.9 (Fallout 4 1.11.240) does not call at all — the string is not
+> present in `f4se_1_11_240.dll`. The plugin was never asked. It now exports both handshakes
+> and declares version data, so it should load; **no flat endpoint has answered a live
+> request yet.** Treat the flat column of the table below as the intended contract, not a
+> tested one, and note the layout caveat: this build's CommonLibF4 models Next-Gen struct
+> layouts and 1.11.240 has not been validated against them. Address-library-resolved calls
+> are correct by construction; direct field reads are where a wrong answer would come from.
 
 ## Install
 

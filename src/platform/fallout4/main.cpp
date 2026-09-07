@@ -207,12 +207,54 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Query(const F4SE::QueryInterface* a
 	if (a_f4se->IsEditor())
 		return false;
 
+	// CommonLibF4 dispatches between three runtimes, so gate against the right minimum for
+	// whichever one loaded us. The two-way IsF4()/else test this replaces was wrong in both
+	// directions: IsF4() is true ONLY for pre-Next-Gen flat builds, so every NG and
+	// Anniversary runtime fell through to the VR branch and was compared against 1.2.72 -- a
+	// check anything with a minor above 2 passes -- while a genuinely supported pre-NG
+	// 1.10.163 was compared against RUNTIME_LATEST (1.10.984) and refused.
 	const auto ver = a_f4se->RuntimeVersion();
-	if (ver < (REL::Module::IsF4() ? F4SE::RUNTIME_LATEST : F4SE::RUNTIME_LATEST_VR))
+	const auto minimum = REL::Module::IsVR() ? F4SE::RUNTIME_LATEST_VR :  // 1.2.72
+	                     REL::Module::IsNG() ? F4SE::RUNTIME_1_10_984 :   // Next-Gen and later
+	                                           F4SE::RUNTIME_1_10_163;    // pre-NG flat
+	if (ver < minimum)
 		return false;
 
 	return true;
 }
+
+// F4SE 0.7.0 replaced the Query/Load handshake with a declarative version record, and by
+// 0.7.9 -- the build for Fallout 4 1.11.240 -- the old one is GONE: the string
+// "F4SEPlugin_Query" does not occur anywhere in f4se_1_11_240.dll. F4SEVR 1.2.72 is the
+// mirror image: it resolves Query and Load and has never heard of F4SEPlugin_Version.
+// This ONE DLL serves both games, so it exports BOTH handshakes and each extender ignores
+// the one it does not look for. Without this record flat Fallout 4 rejected devbench before
+// a line of its code ran -- the plugin was never broken, it was never asked:
+//     plugin devbench.dll (00000000  00000000) no version data 0 (handle 0)
+extern "C" DLLEXPORT constinit auto F4SEPlugin_Version = []() noexcept {
+	F4SE::PluginVersionData data{};
+
+	data.PluginVersion(REL::Version{ DEVBENCH_VERSION_MAJOR, DEVBENCH_VERSION_MINOR,
+		DEVBENCH_VERSION_PATCH, 0 });
+	data.PluginName("devbench"sv);
+
+	// Set these bits directly rather than through UsesAddressLibrary()/IsLayoutDependent():
+	// those helpers hardcode 1 << 1, the 1.10.980-era address library, and a plugin offering
+	// only that bit is not claiming the Anniversary (1.11.137+) library this runtime wants.
+	//   1 << 1 = address library / struct layout for the 1.10.980 family (Next-Gen)
+	//   1 << 2 = address library / struct layout for the 1.11.137 family (Anniversary)
+	data.addressIndependence = (1u << 1) | (1u << 2);
+	data.structureIndependence = (1u << 1) | (1u << 2);
+
+	// compatibleVersions left empty = "any runtime", with an honest caveat: devbench's
+	// CommonLibF4 models Next-Gen struct layouts and 1.11.240 has NOT been validated against
+	// them -- .text grew 34,864 bytes over 1.11.221 alone, with every section shifted.
+	// Address-library-resolved calls are correct by construction; direct field reads are the
+	// risk. If a tool starts returning nonsense on Anniversary, pin what you have verified:
+	//     data.CompatibleVersions({ F4SE::RUNTIME_1_10_984 });
+
+	return data;
+}();
 
 extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f4se)
 {
