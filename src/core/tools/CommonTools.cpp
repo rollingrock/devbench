@@ -285,12 +285,12 @@ namespace dvb::tools
 				name.find("..") != std::string::npos)
 				throw ToolError(400, "log: 'file' must be a bare filename in the extender's log directory");
 
-			const auto path = dir / name;
+			const auto    path = dir / name;
 			std::ifstream in(path);
 			if (!in)
 				throw ToolError(404, "log: cannot open " + path.string());
 
-			std::int64_t tail = std::clamp<std::int64_t>(a_args.value("tail", 80), 1, 5000);
+			std::int64_t      tail = std::clamp<std::int64_t>(a_args.value("tail", 80), 1, 5000);
 			const std::string needle = a_args.value("grep", std::string{});
 
 			std::vector<std::string> keep;
@@ -378,7 +378,7 @@ namespace dvb::tools
 				"devbench.log), optionally filtered by 'grep' (a plain substring, applied BEFORE "
 				"the tail — so grep+tail gives the last N matching lines, not the matches within "
 				"the last N lines). action='list' enumerates the .log files present. Any plugin's "
-                "log is readable, which is the point: the mod being debugged is usually not devbench.";
+				"log is readable, which is the point: the mod being debugged is usually not devbench.";
 			log.inputSchema = json{
 				{ "type", "object" },
 				{ "properties", json{

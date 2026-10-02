@@ -59,6 +59,8 @@ add_deps("commonlibsse-ng")
 add_packages("skse-menu-framework-api", "nlohmann_json")
 add_defines("_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING") -- SMF header uses std::wstring_convert
 add_defines("UNICODE", "_UNICODE", "_WINSOCKAPI_")
+-- MSVC's default execution charset is the system codepage, not UTF-8; without this,
+-- non-ASCII bytes in string literals (e.g. em dashes in UI tooltip text) get mangled.
 add_cxflags("/utf-8", { force = true })
 add_files("src/platform/skyrim/RecordingsMenu.cpp")
 add_includedirs("src", "src/platform/skyrim")
@@ -72,7 +74,7 @@ set_warnings("all")
 add_deps("commonlibsse-ng")
 add_packages("fuck-api", "imgui", "simpleini", "nlohmann_json")
 add_defines("UNICODE", "_UNICODE", "_WINSOCKAPI_")
-add_cxflags("/utf-8", { force = true })
+add_cxflags("/utf-8", { force = true }) -- see devbench-UI's identical flag for why
 add_files("src/platform/skyrim/RecordingsMenuFuck.cpp")
 add_includedirs("src", "src/platform/skyrim")
 target_end()
@@ -166,13 +168,15 @@ set_default(false)
 set_languages("c++23")
 add_packages("nlohmann_json", "stb")
 -- "include" is on the path for src/core/HostApi.cpp's DevBenchAPI.h, added below.
+-- "src/platform/skyrim" is for GameClock_test's header-only GameClock/TimeScaleControl logic.
 add_includedirs("src", "src/platform/skyrim", "include")
 add_files("tests/*.cpp")
 add_files("src/core/ToolRegistry.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/Ssim.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/gfx/Format.cpp") -- the DXGI decoder + the NaN blind-spot regression
+add_files("src/core/tools/Memory.cpp") -- SEH-guarded reads + the RTTI identity check nodes relies on
 add_files("src/core/Host.cpp", "src/core/Log.cpp") -- the platform seam, stubbed by tests/pch.h
--- Compiled here purely as an INVARIANT CHECK, not because the suite exercises it:
+-- Also compiled here as an INVARIANT CHECK (beyond what HostApi_test exercises):
 -- this target links neither SKSE nor F4SE, so if HostApi.cpp (the cross-plugin C-ABI
 -- provider) or the DevBenchAPI.h it includes ever regains a script-extender
 -- dependency, this build breaks instead of quietly re-coupling the core to Skyrim.
@@ -180,11 +184,11 @@ add_files("src/core/Host.cpp", "src/core/Log.cpp") -- the platform seam, stubbed
 -- be invisible: both real plugin targets have an extender on the include path via
 -- their PCH, so both would keep compiling.
 add_files("src/core/HostApi.cpp", "src/core/ToolExtensions.cpp")
-add_files("src/core/KeyboardInputState.cpp")
-add_files("src/core/VRInputState.cpp")
-add_files("src/core/ConsoleCaptureLogic.cpp")
-add_files("src/core/ReplayTrajectory.cpp")
-add_files("src/core/RecordingActivity.cpp")
+add_files("src/core/KeyboardInputState.cpp") -- key resolution + lease ownership; pure logic
+add_files("src/core/VRInputState.cpp") -- atomic tracked-set validation/encoding; pure logic
+add_files("src/core/ConsoleCaptureLogic.cpp") -- console capture slicing + line sampler; pure logic
+add_files("src/core/ReplayTrajectory.cpp") -- pose keyframe sampling/interpolation; pure logic
+add_files("src/core/RecordingActivity.cpp") -- activity contract + input/trajectory interleave; pure logic
 add_headerfiles("tests/*.h")
 set_pcxxheader("tests/pch.h")
 add_defines("_WINSOCKAPI_")

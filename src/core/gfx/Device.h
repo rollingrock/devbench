@@ -31,7 +31,7 @@ namespace dvb::gfx
 
 	struct TargetRef
 	{
-		std::uint32_t    index = 0;        ///< the engine's own render-target index
+		std::uint32_t    index = 0;          ///< the engine's own render-target index
 		ID3D11Texture2D* texture = nullptr;  ///< borrowed; NOT AddRef'd
 	};
 

@@ -602,9 +602,10 @@
     },
     {
       "name": "ping",
-      "description": "devbench C-ABI self-test; echoes its args.",
+      "description": "Self-test. Returns { ok: true } plus which game answered.",
       "inputSchema": {
-        "type": "object"
+        "type": "object",
+        "properties": {}
       },
       "readOnly": true
     }

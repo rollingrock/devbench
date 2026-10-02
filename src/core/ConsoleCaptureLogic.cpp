@@ -14,6 +14,64 @@ namespace dvb::ConsoleLogCapture
 			if (a_lines.size() > a_maxLines)
 				a_lines.erase(a_lines.begin(), a_lines.end() - static_cast<std::ptrdiff_t>(a_maxLines));
 		}
+
+		// Splits on '\n' and '\r', dropping blank lines.
+		void SplitLines(std::string_view a_text, std::vector<std::string>& a_out)
+		{
+			std::string line;
+			const auto  flush = [&]() {
+				if (!line.empty()) {
+					a_out.push_back(line);
+					line.clear();
+				}
+			};
+			for (const char c : a_text) {
+				if (c == '\n' || c == '\r')
+					flush();
+				else
+					line += c;
+			}
+			flush();
+		}
+
+		// Length of the well-formed UTF-8 sequence at a_text[a_at], or 0 if there is none. The
+		// same rules the serialiser enforces: no overlong forms, no surrogates, nothing past U+10FFFF.
+		std::size_t Utf8SequenceLength(std::string_view a_text, std::size_t a_at)
+		{
+			const auto byte = [&](std::size_t i) { return static_cast<unsigned char>(a_text[i]); };
+			const auto c = byte(a_at);
+			if (c < 0x80)
+				return 1;
+			std::size_t   length = 0;
+			unsigned char low = 0x80;
+			unsigned char high = 0xBF;
+			if (c >= 0xC2 && c <= 0xDF) {
+				length = 2;
+			} else if (c >= 0xE0 && c <= 0xEF) {
+				length = 3;
+				if (c == 0xE0)
+					low = 0xA0;
+				else if (c == 0xED)
+					high = 0x9F;
+			} else if (c >= 0xF0 && c <= 0xF4) {
+				length = 4;
+				if (c == 0xF0)
+					low = 0x90;
+				else if (c == 0xF4)
+					high = 0x8F;
+			} else {
+				return 0;
+			}
+			if (a_at + length > a_text.size())
+				return 0;
+			if (byte(a_at + 1) < low || byte(a_at + 1) > high)
+				return 0;
+			for (std::size_t i = 2; i < length; ++i) {
+				if ((byte(a_at + i) & 0xC0) != 0x80)
+					return 0;
+			}
+			return length;
+		}
 	}
 
 	FenceState FindFence(std::string_view a_text, std::size_t a_fromOffset)
@@ -45,21 +103,66 @@ namespace dvb::ConsoleLogCapture
 			stop = (lineStart == std::string_view::npos || lineStart < start) ? start : lineStart;
 		}
 
-		std::string line;
-		const auto  flush = [&]() {
-			if (!line.empty()) {
-				out.lines.push_back(line);
-				line.clear();
-			}
-		};
-		for (const char c : a_text.substr(start, stop - start)) {
-			if (c == '\n' || c == '\r')
-				flush();
-			else
-				line += c;
-		}
-		flush();
+		SplitLines(a_text.substr(start, stop - start), out.lines);
 		TrimToMostRecent(out.lines, a_maxLines);
+		return out;
+	}
+
+	Appended AppendedLines(std::string_view a_text, std::size_t a_baseline, std::size_t a_maxLines)
+	{
+		Appended out;
+		out.drained = a_text.size() < a_baseline;
+		std::vector<std::string> lines;
+		SplitLines(out.drained ? a_text : a_text.substr(a_baseline), lines);
+		if (lines.size() > a_maxLines)
+			out.omitted = lines.size() - a_maxLines;
+		TrimToMostRecent(lines, a_maxLines);
+		out.lines.reserve(lines.size());
+		for (const auto& line : lines)
+			out.lines.push_back(EscapeInvalidUtf8(line));
+		return out;
+	}
+
+	std::vector<std::string> SplitConsoleCommands(std::string_view a_line)
+	{
+		std::vector<std::string> out;
+		const auto               push = [&](std::string_view a_part) {
+			const auto first = a_part.find_first_not_of(" \t");
+			if (first == std::string_view::npos)
+				return;
+			const auto last = a_part.find_last_not_of(" \t");
+			out.emplace_back(a_part.substr(first, last - first + 1));
+		};
+		bool        quoted = false;
+		std::size_t start = 0;
+		for (std::size_t i = 0; i < a_line.size(); ++i) {
+			if (a_line[i] == '"')
+				quoted = !quoted;
+			else if (a_line[i] == ';' && !quoted) {
+				push(a_line.substr(start, i - start));
+				start = i + 1;
+			}
+		}
+		push(a_line.substr(start));
+		return out;
+	}
+
+	std::string EscapeInvalidUtf8(std::string_view a_text)
+	{
+		static constexpr char kHex[] = "0123456789ABCDEF";
+		std::string           out;
+		out.reserve(a_text.size());
+		for (std::size_t i = 0; i < a_text.size();) {
+			if (const auto length = Utf8SequenceLength(a_text, i); length > 0) {
+				out.append(a_text.substr(i, length));
+				i += length;
+				continue;
+			}
+			const auto c = static_cast<unsigned char>(a_text[i++]);
+			out += "\\x";
+			out += kHex[c >> 4];
+			out += kHex[c & 0xF];
+		}
 		return out;
 	}
 

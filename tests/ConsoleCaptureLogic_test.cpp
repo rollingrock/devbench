@@ -1,6 +1,7 @@
 #include "test_framework.h"
 
 #include "core/ConsoleCaptureLogic.h"
+#include "core/Json.h"
 
 using dvb::ConsoleLogCapture::kMarkerBegin;
 using dvb::ConsoleLogCapture::kMarkerEnd;
@@ -282,4 +283,75 @@ TEST_CASE("fence detection with no offset finds the latest fence")
 	CHECK(state.hasBegin);
 	CHECK(!state.hasEnd);
 	CHECK(!FindFence("no markers here").hasBegin);
+}
+
+using dvb::ConsoleLogCapture::AppendedLines;
+using dvb::ConsoleLogCapture::EscapeInvalidUtf8;
+using dvb::ConsoleLogCapture::SplitConsoleCommands;
+
+TEST_CASE("appended lines are what the buffer gained past the baseline")
+{
+	const std::string before = "player.getpos x\nGetPos: X >> -68.98\n";
+	const std::string after = before + "player.getpos y\nGetPos: Y >> 12.50\n\n";
+	const auto        appended = AppendedLines(after, before.size(), 200);
+	CHECK(!appended.drained);
+	CHECK(appended.omitted == 0);
+	CHECK(appended.lines.size() == 2);
+	CHECK(appended.lines[0] == "player.getpos y");
+	CHECK(appended.lines[1] == "GetPos: Y >> 12.50");
+	CHECK(AppendedLines(before, before.size(), 200).lines.empty());
+}
+
+TEST_CASE("a buffer shorter than the baseline was drained, so all of it is new")
+{
+	const auto appended = AppendedLines("GetPos: Z >> 3.00\n", 400, 200);
+	CHECK(appended.drained);
+	CHECK(appended.lines.size() == 1);
+	CHECK(appended.lines[0] == "GetPos: Z >> 3.00");
+}
+
+TEST_CASE("appended lines keep the most recent and count the rest")
+{
+	const auto appended = AppendedLines("a\nb\nc\nd\ne\n", 0, 2);
+	CHECK(appended.omitted == 3);
+	CHECK(appended.lines.size() == 2);
+	CHECK(appended.lines[0] == "d");
+	CHECK(appended.lines[1] == "e");
+}
+
+TEST_CASE("invalid UTF-8 is escaped and valid UTF-8 is kept")
+{
+	CHECK(EscapeInvalidUtf8("plain text") == "plain text");
+	CHECK(EscapeInvalidUtf8("Caf\xC3\xA9") == "Caf\xC3\xA9");                // e-acute, UTF-8
+	CHECK(EscapeInvalidUtf8("Caf\xE9") == "Caf\\xE9");                       // e-acute, Windows-1252
+	CHECK(EscapeInvalidUtf8("\xC0\xAF") == "\\xC0\\xAF");                    // overlong '/'
+	CHECK(EscapeInvalidUtf8("\xED\xA0\x80") == "\\xED\\xA0\\x80");           // UTF-16 surrogate
+	CHECK(EscapeInvalidUtf8("\xF4\x90\x80\x80") == "\\xF4\\x90\\x80\\x80");  // past U+10FFFF
+	CHECK(EscapeInvalidUtf8("end\xE2\x82") == "end\\xE2\\x82");              // cut-off sequence
+	CHECK(EscapeInvalidUtf8("\xF0\x9F\x98\x80") == "\xF0\x9F\x98\x80");      // U+1F600
+}
+
+TEST_CASE("appended lines always serialise, whatever bytes the game printed")
+{
+	const auto appended = AppendedLines("Name: Caf\xE9 \xC0\n", 0, 200);
+	CHECK(appended.lines.size() == 1);
+	CHECK(appended.lines[0] == "Name: Caf\\xE9 \\xC0");
+	CHECK_NOTHROW(dvb::json(appended.lines).dump());
+}
+
+TEST_CASE("a console line splits on semicolons outside quotes")
+{
+	const auto parts = SplitConsoleCommands("player.getpos y; player.getpos z ;;  tgm ");
+	CHECK(parts.size() == 3);
+	CHECK(parts[0] == "player.getpos y");
+	CHECK(parts[1] == "player.getpos z");
+	CHECK(parts[2] == "tgm");
+
+	const auto quoted = SplitConsoleCommands("player.setname \"a;b\"; tcl");
+	CHECK(quoted.size() == 2);
+	CHECK(quoted[0] == "player.setname \"a;b\"");
+	CHECK(quoted[1] == "tcl");
+
+	CHECK(SplitConsoleCommands(" ; ").empty());
+	CHECK(SplitConsoleCommands("help").size() == 1);
 }

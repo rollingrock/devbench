@@ -40,6 +40,30 @@ namespace dvb::ConsoleLogCapture
 	Slice SliceFencedText(std::string_view a_text, std::size_t a_maxLines, std::size_t a_fromOffset = 0);
 	Slice SliceFencedLines(const std::deque<std::string>& a_lines, std::size_t a_maxLines);
 
+	/// What a console buffer gained past a_baseline, its length before a command ran. Used where
+	/// the command and both reads share one main-thread task, so no markers are needed.
+	struct Appended
+	{
+		std::vector<std::string> lines;
+		/// Older lines cut by a_maxLines.
+		std::size_t omitted = 0;
+		/// The buffer is shorter than the baseline: it was drained in between, so all of it is
+		/// new, and whatever the command printed before the drain is missing.
+		bool drained = false;
+	};
+
+	/// The new lines, blank lines dropped, at most a_maxLines (the most recent), with bytes that
+	/// are not valid UTF-8 escaped (see EscapeInvalidUtf8) so the result always serialises.
+	Appended AppendedLines(std::string_view a_text, std::size_t a_baseline, std::size_t a_maxLines);
+
+	/// The commands in one console line, as the console splits it: on ';' outside double quotes,
+	/// each trimmed, empty ones dropped.
+	std::vector<std::string> SplitConsoleCommands(std::string_view a_line);
+
+	/// a_text with every byte that is not part of a well-formed UTF-8 sequence written as \xNN.
+	/// The JSON serialiser throws on invalid UTF-8, and the game's text is not guaranteed to be.
+	std::string EscapeInvalidUtf8(std::string_view a_text);
+
 	/// Builds a scrollback from repeated looks at one "most recent line" slot. A line replaced
 	/// between two looks is never seen.
 	class LineSampler

@@ -1,6 +1,8 @@
 // GENERATED from lib/commonlibsse-ng/include/RE/B/BSShaderRenderTargets.h.
 // Index == RE::RENDER_TARGET value. Regenerate if that enum changes; the
 // static_assert in Device_Skyrim.cpp catches a length mismatch, not a reorder.
+// A fragment spliced into an initializer; formatted standalone it loses its indent.
+// clang-format off
 	"FRAMEBUFFER",
 	"MAIN",
 	"MAIN_COPY",

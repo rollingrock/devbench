@@ -47,7 +47,14 @@ namespace dvb
 		// RegisterListener de-dupes by listener handle, so the kPostLoad
 		// re-register never reaches the slot of a consumer that loaded later -
 		// the dispatch finds zero respondents forever.
-		[[nodiscard]] void* GetApiEntry();
+		//
+		// a_callerAddress is the export's own return address (_ReturnAddress()), so the
+		// request is recorded as a Consumer named by the module it came from ("FRIK.dll").
+		// The export takes no arguments and cannot gain one without breaking shipped
+		// consumers, so this is the only caller identity that route can have. Without
+		// it, a plugin on this route registered tools while `registrants` listed no
+		// consumer at all. Null records "<?>".
+		[[nodiscard]] void* GetApiEntry(const void* a_callerAddress);
 
 		// Handle a DevBenchMessage::kMessage_GetInterface request. Call from the
 		// platform's message listener for every message — it no-ops unless it is the
@@ -62,9 +69,10 @@ namespace dvb
 		// dressed up as an observation.
 		struct Consumer
 		{
-			std::string   name;  // a_message->sender, or "<?>" if unset
+			std::string   name;  // message: the extender's sender name ("FRIK"); export: the calling module's file name ("FRIK.dll"); "<?>" if neither is known
 			long long     atEpoch;
 			std::uint32_t atFrame;
+			std::string   route;  // "message" | "export"
 		};
 
 		// A successful RegisterTool/RegisterToolExtension call over the C-ABI.

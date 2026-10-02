@@ -24,8 +24,8 @@ namespace dvb::gfx
 	{
 		std::uint32_t             width = 0;
 		std::uint32_t             height = 0;
-		std::uint32_t             format = 0;   ///< DXGI_FORMAT
-		std::uint32_t             pitch = 0;    ///< row stride in bytes
+		std::uint32_t             format = 0;  ///< DXGI_FORMAT
+		std::uint32_t             pitch = 0;   ///< row stride in bytes
 		std::vector<std::uint8_t> bytes;
 
 		[[nodiscard]] bool Valid() const { return width && height && !bytes.empty(); }

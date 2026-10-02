@@ -189,8 +189,8 @@ namespace dvb::gfx
 			return false;
 		}
 
-		const std::uint32_t rowBytes = BmpRowBytes(a_surface.width);
-		const std::uint32_t imageBytes = rowBytes * a_surface.height;
+		const std::uint32_t     rowBytes = BmpRowBytes(a_surface.width);
+		const std::uint32_t     imageBytes = rowBytes * a_surface.height;
 		constexpr std::uint32_t headerBytes = 14u + 40u;
 
 		const auto put16 = [&](std::uint16_t v) { out.write(reinterpret_cast<const char*>(&v), 2); };
@@ -217,7 +217,7 @@ namespace dvb::gfx
 			const auto* src = a_surface.bytes.data() +
 			                  static_cast<std::size_t>(a_surface.height - 1u - y) * a_surface.pitch;
 			for (std::uint32_t x = 0; x < a_surface.width; ++x) {
-				const auto px = Decode(a_surface.format, src + static_cast<std::size_t>(x) * bpp);
+				const auto   px = Decode(a_surface.format, src + static_cast<std::size_t>(x) * bpp);
 				std::uint8_t r, g, b;
 				if (px.nonFinite) {
 					// MAGENTA — never a real scene colour, so a NaN region is

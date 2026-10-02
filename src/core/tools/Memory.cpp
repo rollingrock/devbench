@@ -34,6 +34,87 @@ namespace dvb::mem
 			return 0x08000000;  // 128 MB fallback — larger than any Creation Engine exe
 		}
 
+		// MSVC x64 RTTI as the compiler lays it out. Every reference inside is an
+		// image-relative RVA, and the locator's RVA of itself (`self`) is what recovers
+		// the image base — so this works for a class from any module, not only the exe.
+		struct CompleteObjectLocator
+		{
+			std::uint32_t signature;  // 1 on x64; 0 is the x86 layout (absolute pointers)
+			std::uint32_t offset;
+			std::uint32_t cdOffset;
+			std::int32_t  typeDescriptor;
+			std::int32_t  classDescriptor;
+			std::int32_t  self;
+		};
+
+		struct ClassHierarchyDescriptor
+		{
+			std::uint32_t signature;
+			std::uint32_t attributes;
+			std::uint32_t numBaseClasses;
+			std::int32_t  baseClassArray;  // RVA of int32 RVAs, one per BaseClassDescriptor
+		};
+
+		// The object's first qword is a vtable, vtable[-1] a locator, and the base the
+		// locator implies is a loaded PE image. The last check is the one that matters:
+		// without it any aligned qword pair that happens to read as `1` qualifies.
+		bool ReadLocator(std::uintptr_t a_object, CompleteObjectLocator& a_col, std::uintptr_t& a_moduleBase)
+		{
+			if (a_object < 0x10000 || (a_object & 7) != 0)
+				return false;
+			std::uintptr_t vtable = 0;
+			if (!SafeRead(reinterpret_cast<const void*>(a_object), &vtable, sizeof(vtable)) || vtable < 0x10000 || (vtable & 7) != 0)
+				return false;
+			std::uintptr_t colVA = 0;
+			if (!SafeRead(reinterpret_cast<const void*>(vtable - 8), &colVA, sizeof(colVA)) || colVA < 0x10000)
+				return false;
+			if (!SafeRead(reinterpret_cast<const void*>(colVA), &a_col, sizeof(a_col)) || a_col.signature != 1 || a_col.self <= 0)
+				return false;
+			a_moduleBase = colVA - static_cast<std::uint32_t>(a_col.self);
+			std::uint16_t mz = 0;
+			return (a_moduleBase & 0xFFFF) == 0 &&
+			       SafeRead(reinterpret_cast<const void*>(a_moduleBase), &mz, sizeof(mz)) && mz == 0x5A4D;
+		}
+
+		// TypeDescriptor::name, at +0x10: ".?AVNiNode@@". Read a byte at a time so a
+		// name ending just before an unreadable page is not refused for what follows it.
+		bool ReadMangledName(std::uintptr_t a_typeDescriptor, std::string& a_out)
+		{
+			a_out.clear();
+			for (std::size_t i = 0; i < 512; ++i) {
+				char c = 0;
+				if (!SafeRead(reinterpret_cast<const void*>(a_typeDescriptor + 0x10 + i), &c, 1))
+					return false;
+				if (c == '\0')
+					return a_out.starts_with(".?A");
+				a_out.push_back(c);
+			}
+			return false;
+		}
+
+		// ".?AVNiNode@@" -> "NiNode", ".?AUFoo@ns@@" -> "ns::Foo". Plain class and struct
+		// names only: a template ("?$") comes back past the prefix, undecoded, which is
+		// still unique and still readable enough to act on.
+		std::string Demangle(std::string_view a_mangled)
+		{
+			std::string_view s = a_mangled.substr(4);  // ".?AV" (class) / ".?AU" (struct)
+			if (!s.ends_with("@@") || s.find("?$") != std::string_view::npos)
+				return std::string(s);
+			s.remove_suffix(2);
+			std::string out;
+			while (!s.empty()) {
+				const auto at = s.rfind('@');
+				const auto part = (at == std::string_view::npos) ? s : s.substr(at + 1);
+				if (!out.empty())
+					out += "::";
+				out += part.starts_with("?A") ? "`anonymous namespace'" : std::string(part);
+				if (at == std::string_view::npos)
+					break;
+				s = s.substr(0, at);
+			}
+			return out;
+		}
+
 		struct ExprParser
 		{
 			std::string_view s;
@@ -165,9 +246,44 @@ namespace dvb::mem
 		return a_va >= base && a_va < base + ImageSize();
 	}
 
+	std::optional<std::string> RttiClassName(std::uintptr_t a_object)
+	{
+		CompleteObjectLocator col{};
+		std::uintptr_t        base = 0;
+		std::string           mangled;
+		if (!ReadLocator(a_object, col, base) || col.typeDescriptor <= 0 || !ReadMangledName(base + col.typeDescriptor, mangled))
+			return std::nullopt;
+		return Demangle(mangled);
+	}
+
+	bool RttiIsA(std::uintptr_t a_object, std::string_view a_class)
+	{
+		CompleteObjectLocator    col{};
+		std::uintptr_t           base = 0;
+		ClassHierarchyDescriptor chd{};
+		if (!ReadLocator(a_object, col, base) || col.classDescriptor <= 0 ||
+			!SafeRead(reinterpret_cast<const void*>(base + col.classDescriptor), &chd, sizeof(chd)) ||
+			chd.numBaseClasses == 0 || chd.numBaseClasses > 256 || chd.baseClassArray <= 0)
+			return false;
+		// Entry 0 is the class itself, the rest its bases, each a BaseClassDescriptor
+		// whose first field is the RVA of that class's TypeDescriptor.
+		std::string mangled;
+		for (std::uint32_t i = 0; i < chd.numBaseClasses; ++i) {
+			std::int32_t bcd = 0;
+			std::int32_t td = 0;
+			if (!SafeRead(reinterpret_cast<const void*>(base + chd.baseClassArray + i * 4), &bcd, sizeof(bcd)) || bcd <= 0 ||
+				!SafeRead(reinterpret_cast<const void*>(base + bcd), &td, sizeof(td)) || td <= 0 ||
+				!ReadMangledName(base + td, mangled))
+				return false;
+			if (Demangle(mangled) == a_class)
+				return true;
+		}
+		return false;
+	}
+
 	bool ResolveAddress(std::string_view a_expr, std::uint64_t& a_out, std::string& a_error)
 	{
-		ExprParser p{ a_expr };
+		ExprParser          p{ a_expr };
 		const std::uint64_t v = p.Expr();
 		if (!p.ok) {
 			a_error = p.err;

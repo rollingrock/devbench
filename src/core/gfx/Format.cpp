@@ -84,14 +84,15 @@ namespace dvb::gfx
 	{
 		Pixel out;
 		switch (a_format) {
-		case kR11G11B10_FLOAT: {
-			std::uint32_t px = 0;
-			std::memcpy(&px, a_src, 4);
-			out.r = DecodeSmallFloat(px & 0x7ffu, 6, out.nonFinite);
-			out.g = DecodeSmallFloat((px >> 11) & 0x7ffu, 6, out.nonFinite);
-			out.b = DecodeSmallFloat((px >> 22) & 0x3ffu, 5, out.nonFinite);
-			break;
-		}
+		case kR11G11B10_FLOAT:
+			{
+				std::uint32_t px = 0;
+				std::memcpy(&px, a_src, 4);
+				out.r = DecodeSmallFloat(px & 0x7ffu, 6, out.nonFinite);
+				out.g = DecodeSmallFloat((px >> 11) & 0x7ffu, 6, out.nonFinite);
+				out.b = DecodeSmallFloat((px >> 22) & 0x3ffu, 5, out.nonFinite);
+				break;
+			}
 		case kR8G8B8A8_UNORM:
 		case kR8G8B8A8_UNORM_SRGB:
 			// Already display-referred; hand back 0..1 so ToByte is a no-op round trip
@@ -106,27 +107,29 @@ namespace dvb::gfx
 			out.g = a_src[1] / 255.0f;
 			out.r = a_src[2] / 255.0f;
 			break;
-		case kR16G16_UNORM: {
-			// A G-buffer normals target: two channels, Z reconstructed in-shader from
-			// an encoding (octahedral, hemi, …) we would have to guess. Shown as
-			// R=x, G=y, B=0 deliberately — guessing wrong would produce a
-			// plausible-looking image that lies. Two channels of truth beat three of
-			// speculation. UNORM cannot be NaN, so this never contributes to NaN%.
-			std::uint16_t xy[2]{};
-			std::memcpy(xy, a_src, 4);
-			out.r = xy[0] / 65535.0f;
-			out.g = xy[1] / 65535.0f;
-			out.b = 0.0f;
-			break;
-		}
-		case kR16G16B16A16_FLOAT: {
-			std::uint16_t h[4]{};
-			std::memcpy(h, a_src, 8);
-			out.r = DecodeHalf(h[0], out.nonFinite);
-			out.g = DecodeHalf(h[1], out.nonFinite);
-			out.b = DecodeHalf(h[2], out.nonFinite);
-			break;
-		}
+		case kR16G16_UNORM:
+			{
+				// A G-buffer normals target: two channels, Z reconstructed in-shader from
+				// an encoding (octahedral, hemi, …) we would have to guess. Shown as
+				// R=x, G=y, B=0 deliberately — guessing wrong would produce a
+				// plausible-looking image that lies. Two channels of truth beat three of
+				// speculation. UNORM cannot be NaN, so this never contributes to NaN%.
+				std::uint16_t xy[2]{};
+				std::memcpy(xy, a_src, 4);
+				out.r = xy[0] / 65535.0f;
+				out.g = xy[1] / 65535.0f;
+				out.b = 0.0f;
+				break;
+			}
+		case kR16G16B16A16_FLOAT:
+			{
+				std::uint16_t h[4]{};
+				std::memcpy(h, a_src, 8);
+				out.r = DecodeHalf(h[0], out.nonFinite);
+				out.g = DecodeHalf(h[1], out.nonFinite);
+				out.b = DecodeHalf(h[2], out.nonFinite);
+				break;
+			}
 		default:
 			break;  // caller must gate on IsSupported
 		}
@@ -136,11 +139,12 @@ namespace dvb::gfx
 	bool IsNonFinite(std::uint32_t a_format, std::uint64_t a_raw)
 	{
 		switch (a_format) {
-		case kR11G11B10_FLOAT: {
-			// 5-bit exponent per channel; all-ones = Inf/NaN.
-			const auto px = static_cast<std::uint32_t>(a_raw);
-			return ((px >> 6) & 0x1f) == 0x1f || ((px >> 17) & 0x1f) == 0x1f || ((px >> 27) & 0x1f) == 0x1f;
-		}
+		case kR11G11B10_FLOAT:
+			{
+				// 5-bit exponent per channel; all-ones = Inf/NaN.
+				const auto px = static_cast<std::uint32_t>(a_raw);
+				return ((px >> 6) & 0x1f) == 0x1f || ((px >> 17) & 0x1f) == 0x1f || ((px >> 27) & 0x1f) == 0x1f;
+			}
 		case kR8G8B8A8_UNORM:
 		case kR8G8B8A8_UNORM_SRGB:
 		case kB8G8R8A8_UNORM:
@@ -161,12 +165,13 @@ namespace dvb::gfx
 	bool IsDark(std::uint32_t a_format, std::uint64_t a_raw)
 	{
 		switch (a_format) {
-		case kR11G11B10_FLOAT: {
-			// Every channel exponent below 12 (~< 0.125). NOTE the exponent-31 NaN
-			// case is NOT excluded here on purpose — see Format.h. Ask IsNonFinite too.
-			const auto px = static_cast<std::uint32_t>(a_raw);
-			return ((px >> 6) & 0x1f) < 12 && ((px >> 17) & 0x1f) < 12 && ((px >> 27) & 0x1f) < 12;
-		}
+		case kR11G11B10_FLOAT:
+			{
+				// Every channel exponent below 12 (~< 0.125). NOTE the exponent-31 NaN
+				// case is NOT excluded here on purpose — see Format.h. Ask IsNonFinite too.
+				const auto px = static_cast<std::uint32_t>(a_raw);
+				return ((px >> 6) & 0x1f) < 12 && ((px >> 17) & 0x1f) < 12 && ((px >> 27) & 0x1f) < 12;
+			}
 		case kR8G8B8A8_UNORM:
 		case kR8G8B8A8_UNORM_SRGB:
 		case kB8G8R8A8_UNORM:

@@ -14,9 +14,9 @@
 #include "SKSEMenuFramework.h"
 
 #include "InputHotkeys.h"    // dvb::GetHotkeys (read-only hotkey display)
-#include "core/Json.h"            // dvb::json (nlohmann) — unrelated to imgui, safe in this TU
 #include "RecordingsView.h"  // dvb::ui row model
-#include "core/Server.h"          // dvb::RunTool / OpenRecordingsFolder
+#include "core/Json.h"       // dvb::json (nlohmann) — unrelated to imgui, safe in this TU
+#include "core/Server.h"     // dvb::RunTool / OpenRecordingsFolder
 
 #include <set>
 #include <string>

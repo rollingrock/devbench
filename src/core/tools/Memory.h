@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -30,6 +31,21 @@ namespace dvb::mem
 	/// needing destruction, which is what lets them use __try/__except at all.
 	bool SafeRead(const void* a_src, void* a_dst, std::size_t a_len) noexcept;
 	bool SafeWrite(void* a_dst, const void* a_src, std::size_t a_len) noexcept;
+
+	/// The dynamic class of the polymorphic object at `a_object`, read from its MSVC
+	/// RTTI (vtable[-1] -> CompleteObjectLocator -> TypeDescriptor) with SafeRead only,
+	/// so it never calls into the object — which is the point: it identifies what a
+	/// pointer really is BEFORE anything trusts it enough to make a virtual call. A
+	/// wrong struct offset yields a plausible-looking qword far more often than a
+	/// faulting one; this is what turns "looks like a pointer" into "is a NiNode".
+	/// Returns the demangled name ("NiNode", "ns::Foo"), or nullopt when the memory
+	/// there is not a polymorphic object with RTTI.
+	std::optional<std::string> RttiClassName(std::uintptr_t a_object);
+
+	/// True if the object's dynamic class is `a_class`, or derives from it (matched
+	/// against the demangled names in its RTTI base-class array). Same guarantees as
+	/// RttiClassName: reads only, never calls.
+	bool RttiIsA(std::uintptr_t a_object, std::string_view a_class);
 
 	/// Resolve an address expression.
 	///

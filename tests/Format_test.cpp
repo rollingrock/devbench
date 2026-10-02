@@ -29,8 +29,8 @@ namespace
 	}
 
 	// Exponent field all-ones = Inf/NaN.
-	constexpr std::uint32_t kChan11NaN = 0x1fu << 6;   // 5-bit exponent above a 6-bit mantissa
-	constexpr std::uint32_t kChan10NaN = 0x1fu << 5;   // 5-bit exponent above a 5-bit mantissa
+	constexpr std::uint32_t kChan11NaN = 0x1fu << 6;  // 5-bit exponent above a 6-bit mantissa
+	constexpr std::uint32_t kChan10NaN = 0x1fu << 5;  // 5-bit exponent above a 5-bit mantissa
 	constexpr std::uint32_t kChan11Zero = 0u;
 
 	// A mid-grey-ish value: exponent 14 (= 2^-1), zero mantissa.
@@ -60,7 +60,7 @@ TEST_CASE("format: NaN reads as BRIGHT to the darkness test -- ask IsNonFinite t
 
 TEST_CASE("format: NaN reads as bright in RGBA16F too")
 {
-	std::uint64_t nan = 0;
+	std::uint64_t       nan = 0;
 	const std::uint16_t chans[4] = { HalfBits(0x1f, 1), HalfBits(0x1f, 1), HalfBits(0x1f, 1), 0 };
 	std::memcpy(&nan, chans, sizeof(chans));
 

@@ -1,7 +1,7 @@
 #include "StallWatchdog.h"
 
-#include "core/EventBus.h"
 #include "GameEvents.h"
+#include "core/EventBus.h"
 #include "core/GameState.h"
 #include "core/Json.h"
 

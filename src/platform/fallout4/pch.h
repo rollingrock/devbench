@@ -9,10 +9,10 @@
 // one in the build. Same reason as the Skyrim PCH.
 #define _WINSOCKAPI_
 
+#include <F4SE/F4SE.h>
 #include <RE/Fallout.h>
 #include <REL/Relocation.h>
 #include <REX/REX.h>
-#include <F4SE/F4SE.h>
 
 #include <Windows.h>
 

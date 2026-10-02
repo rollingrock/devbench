@@ -63,6 +63,18 @@ export async function listTools(
   return body.tools;
 }
 
+interface DevbenchHealth {
+  /** The game process that answered; a new one means the game restarted. */
+  pid?: number;
+  [key: string]: unknown;
+}
+
+/** GET /api/health: devbench's liveness probe, answered off the game's main thread. */
+export async function health(target: Target): Promise<DevbenchHealth> {
+  const base = resolveBaseUrlOrThrowUnavailable(target);
+  return (await fetchJson(`${base}/api/health`)) as DevbenchHealth;
+}
+
 export async function callTool(
   target: Target,
   name: string,

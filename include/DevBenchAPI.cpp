@@ -89,7 +89,6 @@ namespace DevBenchAPI
 		if (!message.GetApiFunction)
 			return nullptr;
 
-
 		g_devBenchInterface = static_cast<IDevBenchInterface001*>(message.GetApiFunction(1));
 		return g_devBenchInterface;
 	}

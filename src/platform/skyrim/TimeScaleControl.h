@@ -153,7 +153,7 @@ namespace dvb::TimeScaleControl
 		bool         m_seeded = false;
 	};
 
-	// --- engine-facing (src/TimeScaleControl.cpp) ---
+	// --- engine-facing (src/platform/skyrim/TimeScaleControl.cpp) ---
 
 	struct SetResult
 	{

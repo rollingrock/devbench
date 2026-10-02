@@ -288,10 +288,15 @@ namespace dvb
 
 	json BridgeDiscoveryInfo()
 	{
-		if (host::Get().game != "skyrim")
-			return json{ { "supported", false }, { "reason", "The stdio bridge currently supports Skyrim only; use the native MCP or REST endpoint for this game." } };
-		const bool        vr = host::Get().vr;
-		const std::string game = vr ? "vr" : "se";
+		// The bridge's --game value for this instance (bridge/src/runtime.ts GAMES).
+		const auto& id = host::Get();
+		std::string game;
+		if (id.game == "skyrim")
+			game = id.vr ? "vr" : "se";
+		else if (id.game == "fallout4")
+			game = id.vr ? "fo4vr" : "fo4";
+		else
+			return json{ { "supported", false }, { "reason", "The stdio bridge does not know this game yet; use the native MCP or REST endpoint." } };
 		std::error_code   ec;
 		const std::string exePath = std::filesystem::absolute(host::DataDir() / "devbench-bridge.exe", ec).string();
 		const std::string name = "devbench-" + game;
@@ -311,6 +316,14 @@ namespace dvb
 		};
 		if (auto dir = ExternalStateDir())
 			result["externalStateDir"] = dir->string();
+		// Only the Skyrim release archive ships the exe beside the plugin, so say whether
+		// the path above is real rather than hand out a snippet that cannot start.
+		result["exeFound"] = std::filesystem::exists(exePath, ec);
+		if (!result["exeFound"].get<bool>())
+			result["exeNote"] =
+				"devbench-bridge.exe is not at exePath. It is one exe for every game: copy it there from "
+				"a devbench release archive, or build it from the repo's bridge/ folder (npm run compile), "
+				"and point `command` at wherever it lives.";
 		return result;
 	}
 }

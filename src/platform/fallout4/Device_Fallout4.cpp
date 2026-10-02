@@ -79,7 +79,7 @@ namespace
 		} else {
 			try {
 				// REL::ID(1235449) is a RendererData** — the global holding the pointer.
-				const auto slot = REL::ID(1235449).address();
+				const auto     slot = REL::ID(1235449).address();
 				std::uintptr_t p = 0;
 				if (dvb::mem::SafeRead(reinterpret_cast<const void*>(slot), &p, sizeof(p)))
 					rendererData = p;

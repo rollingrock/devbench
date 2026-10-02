@@ -98,8 +98,8 @@ namespace dvb::tools
 			// 0 = full resolution. The default trades a little detail for a capture
 			// that returns promptly and produces a file you can open, rather than a
 			// 25 MB bitmap of a 4K buffer.
-			const auto maxDim = a_args.value("maxDimension", 1024u);
-			const bool wantFile = (action == "dump");
+			const auto        maxDim = a_args.value("maxDimension", 1024u);
+			const bool        wantFile = (action == "dump");
 			const std::string label = a_args.value("label", std::string{});
 
 			// One main-thread task does the copy, the analysis and the file write.
@@ -167,10 +167,10 @@ namespace dvb::tools
 			std::vector<double> frames;  // ms
 			frames.reserve(4096);
 
-			const auto  qpcFreq = []() { LARGE_INTEGER f{}; ::QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart); }();
-			const auto  now = []() { LARGE_INTEGER c{}; ::QueryPerformanceCounter(&c); return c.QuadPart; };
-			const auto  start = now();
-			const auto  deadline = start + static_cast<std::int64_t>(qpcFreq * static_cast<double>(durationMs) / 1000.0);
+			const auto qpcFreq = []() { LARGE_INTEGER f{}; ::QueryPerformanceFrequency(&f); return static_cast<double>(f.QuadPart); }();
+			const auto now = []() { LARGE_INTEGER c{}; ::QueryPerformanceCounter(&c); return c.QuadPart; };
+			const auto start = now();
+			const auto deadline = start + static_cast<std::int64_t>(qpcFreq * static_cast<double>(durationMs) / 1000.0);
 
 			int          lastFrame = game::CurrentFrame();
 			std::int64_t lastTick = start;

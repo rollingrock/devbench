@@ -8,9 +8,12 @@
 #include "core/ToolExtensions.h"
 #include "core/ToolRegistry.h"
 
+#include <Windows.h>
+
 #include <ctime>
 #include <limits>
 #include <mutex>
+#include <string_view>
 
 namespace dvb::HostApi
 {
@@ -30,14 +33,39 @@ namespace dvb::HostApi
 		std::vector<Consumer>     g_consumers;
 		std::vector<Registration> g_registrations;
 
-		void NoteConsumer(const char* a_sender)
+		void NoteConsumer(std::string a_name, const char* a_route)
 		{
 			std::lock_guard<std::mutex> lock(g_ledgerMutex);
 			g_consumers.push_back(Consumer{
-				a_sender ? std::string(a_sender) : std::string("<?>"),
+				std::move(a_name),
 				static_cast<long long>(std::time(nullptr)),
 				static_cast<std::uint32_t>(game::CurrentFrame()),
+				a_route,
 			});
+		}
+
+		// File name of the module that contains a_address ("FRIK.dll"), or "<?>". The
+		// address is a return address into the caller, so this names whoever called.
+		std::string ModuleNameAt(const void* a_address)
+		{
+			HMODULE module = nullptr;
+			if (!a_address ||
+				!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+					static_cast<LPCWSTR>(a_address), &module))
+				return "<?>";
+			wchar_t     path[MAX_PATH]{};
+			const DWORD length = ::GetModuleFileNameW(module, path, MAX_PATH);
+			if (length == 0)
+				return "<?>";
+			std::wstring_view full(path, length);
+			const auto        slash = full.find_last_of(L"\\/");
+			const auto        file = slash == std::wstring_view::npos ? full : full.substr(slash + 1);
+			const int         bytes = ::WideCharToMultiByte(CP_UTF8, 0, file.data(), static_cast<int>(file.size()), nullptr, 0, nullptr, nullptr);
+			std::string       out(static_cast<std::size_t>(bytes > 0 ? bytes : 0), '\0');
+			if (bytes <= 0 ||
+				::WideCharToMultiByte(CP_UTF8, 0, file.data(), static_cast<int>(file.size()), out.data(), bytes, nullptr, nullptr) != bytes)
+				return "<?>";
+			return out;
 		}
 
 		void NoteRegistration(std::string a_kind, std::string a_name, bool a_replacedExisting)
@@ -167,11 +195,14 @@ namespace dvb::HostApi
 
 		// Self-test: register a trivial tool THROUGH the public interface, proving the
 		// C-callback + JSON round-trip path end to end without a separate consumer.
+		// Its own dotted name, like any mod tool: Init runs after the built-in tools are
+		// registered and Register replaces by name, so this used to be called "ping" and
+		// silently took the core `ping` ({ ok, game, exe, vr }) over on every game.
 		void RegisterSelfTest()
 		{
 			static constexpr const char* desc =
 				R"({"description":"devbench C-ABI self-test; echoes its args.","inputSchema":{"type":"object"},"readOnly":true})";
-			g_interface.RegisterTool("ping", desc, +[](void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write) {
+			g_interface.RegisterTool("devbench.selftest", desc, +[](void*, const char* a_argsJson, void* a_sink, DevBenchAPI::WriteFn a_write) {
 					const std::string args = (a_argsJson && *a_argsJson) ? a_argsJson : "{}";
 					const std::string out = R"({"pong":true,"echo":)" + args + "}";
 					a_write(a_sink, out.c_str()); }, nullptr);
@@ -208,8 +239,11 @@ namespace dvb::HostApi
 		RegisterExtensionSelfTests();
 	}
 
-	void* GetApiEntry()
+	void* GetApiEntry(const void* a_callerAddress)
 	{
+		auto name = ModuleNameAt(a_callerAddress);
+		dlog::info("devbench: provided plugin interface to {} (export)", name);
+		NoteConsumer(std::move(name), "export");
 		return reinterpret_cast<void*>(&GetApi);
 	}
 
@@ -217,7 +251,7 @@ namespace dvb::HostApi
 	{
 		if (a_type == DevBenchAPI::DevBenchMessage::kMessage_GetInterface && a_data) {
 			static_cast<DevBenchAPI::DevBenchMessage*>(a_data)->GetApiFunction = GetApi;
-			NoteConsumer(a_sender);
+			NoteConsumer(a_sender ? std::string(a_sender) : std::string("<?>"), "message");
 			dlog::info("devbench: provided plugin interface to {}", a_sender ? a_sender : "<?>");
 		}
 	}

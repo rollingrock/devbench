@@ -1,0 +1,245 @@
+{
+  "tools": [
+    {
+      "name": "log",
+      "description": "Read a script-extender plugin log from Documents/My Games/<game>/<extender>/. action='tail' (default) returns the last 'tail' lines of 'file' (default devbench.log), optionally filtered by 'grep' (a plain substring, applied BEFORE the tail — so grep+tail gives the last N matching lines, not the matches within the last N lines). action='list' enumerates the .log files present. Any plugin's log is readable, which is the point: the mod being debugged is usually not devbench.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "enum": ["tail", "list"],
+            "type": "string"
+          },
+          "file": {
+            "description": "bare filename, default 'devbench.log'",
+            "type": "string"
+          },
+          "grep": {
+            "description": "substring filter applied before the tail",
+            "type": "string"
+          },
+          "tail": {
+            "description": "line count, 1..5000, default 80",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "readOnly": true
+    },
+    {
+      "name": "ping",
+      "description": "Self-test. Returns { ok: true } plus which game answered.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "readOnly": true
+    },
+    {
+      "name": "memory",
+      "description": "Read (and, when enabled, write) the game process's memory by ADDRESS EXPRESSION — the reverse-engineering half of the bench, available on every game. Grammar: expr := term (('+'|'-') term)* ; term := '[' expr ']' | 'base' | 0xHEX | DEC. 'base' is the executable's load base and '[x]' dereferences a qword, so an RVA from a Ghidra session pastes in verbatim: addr='base+0x1d98ff0', or addr='[base+0x6239340]+4' to reach a field through a singleton pointer. action='resolve' returns { addr, rva|heap, base } without touching the target — an RVA is reported ONLY for addresses inside the image, so a heap pointer cannot be mistaken for one. action='read' (default) returns 'count' values of 'type' (u8|u16|u32|u64|i32|i64|f32|f64|ptr|bytes|cstr; count capped at 4096, and 'capped' says so). NaN/Inf come back as the strings \"NaN\"/\"Inf\", never as null. 'cstr' returns { value, length, printable } with non-printable bytes escaped as \\xNN, so probing an address that turns out NOT to hold text answers 'printable: false' rather than failing — a scan over unknown memory needs that to be a readable answer. action='write' needs confirm=true AND allowMemoryWrites=true in config.json, and echoes { before, after, held } so you have an undo and can tell a write that stuck from one the engine overwrote. Every access is SEH-guarded: a bad address is a 400 naming the faulting address, never a crash.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "description": "default 'read'",
+            "enum": ["resolve", "read", "write"],
+            "type": "string"
+          },
+          "addr": {
+            "description": "address expression, e.g. 'base+0x1d98ff0' or '[base+0x6239340]+4'",
+            "type": "string"
+          },
+          "confirm": {
+            "description": "write: must be true",
+            "type": "boolean"
+          },
+          "count": {
+            "description": "read: element count (cstr: byte length). Capped at 4096.",
+            "type": "integer"
+          },
+          "type": {
+            "description": "default 'u32'",
+            "enum": [
+              "u8",
+              "u16",
+              "u32",
+              "u64",
+              "i32",
+              "i64",
+              "f32",
+              "f64",
+              "ptr",
+              "bytes",
+              "cstr"
+            ],
+            "type": "string"
+          },
+          "value": {
+            "description": "write: the value. A string is parsed with strtoull, so \"0x41\" works."
+          }
+        },
+        "required": ["addr"],
+        "type": "object"
+      }
+    },
+    {
+      "name": "rendertarget",
+      "description": "Look INSIDE the renderer: list the engine's render targets, measure one, or dump it to an image. This is what a screenshot cannot give you — the G-buffer, the light accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. action='list' → every live target as { index, width, height, format, formatName, arraySize, sampleCount, decodable }. action='stats' → copies target 'index' back to the CPU and returns { nonFinitePct, darkPct, meanLuma, maxChannel } WITHOUT writing a file. action='dump' → the same plus a 24-bit BMP under Data/<extender>/Plugins/devbench/captures (optional 'label' in the filename). 'maxDimension' (default 1024, 0 = native) integer-downsamples so a 4K buffer stays openable; sampling is nearest-neighbour, not averaged, because averaging hides the single-pixel artefact you are hunting. HDR is Reinhard-tone-mapped, and NaN/Inf pixels are painted MAGENTA rather than clamped — clamping makes a NaN-filled buffer indistinguishable from a legitimately overbright one. Read nonFinitePct before darkPct: NaN displays black but reads as BRIGHT to any exponent test, so 'darkPct: 0' alone has historically meant 'not measuring the problem'. Runs on the main thread and stalls a frame — an instrument, not something to poll.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "description": "default 'list'",
+            "enum": ["list", "stats", "dump"],
+            "type": "string"
+          },
+          "index": {
+            "description": "engine render-target index, from action='list'",
+            "type": "integer"
+          },
+          "label": {
+            "description": "dump: appended to the filename",
+            "type": "string"
+          },
+          "maxDimension": {
+            "description": "downsample so the longest side fits; default 1024, 0 = native",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "inspect",
+      "description": "Read live game state. Runs on the main thread and returns the value synchronously (a 504 means the main thread did not service the task — the message says whether it was busy or hung). kinds: 'state' → { plugin, version, playerLoaded, frame, pid, port, exe, vr, game, extender } — the identity fields name the instance that answered, so a session attached to several running games (Skyrim on 8920, Fallout on 8930) can confirm which one it reached; 'health' → the same identity plus { frame, lastTaskFrame, pendingTasks }, and it is the ONLY kind answered WITHOUT the main thread, so it still replies while a busy or hung main thread would 504, plus { blocking } — is a modal open right now (see 'ui'); 'ui' → { openMenus, messageBoxOpen, blocking, source, menuEvents }, ALSO answered without the main thread (same reason as 'health' — it has to be trustworthy exactly when the game is stuck behind a modal). `source` is 'menuMap' when the answer came from the engine's own menu map (ground truth) and 'none' when nothing is tracking — in which case `blocking:false` means nothing, so check it before believing a false; 'scene' → { position, cell, cellFormId, interior, worldspace?, gameHour, daysPassed } (worldspace is absent, not empty, for an interior cell); 'player' → { formId, level, name }; 'registrants' → who has requested the C-ABI interface and what they registered through it { consumers:[{name,route,atEpoch,atFrame}] (route: message = extender handshake, name is the sender; export = DevBench_GetApiFunction, name is the calling DLL), registrations:[{kind,name,atEpoch,atFrame,replaced}], capabilities:{capture,inspect,menu → [registered keys]} } — side by side, not joined, since the C-ABI has no per-call caller identity; 'extensions' → the kinds other plugins added via the C-ABI RegisterToolExtension, with their descriptors, and kind=<registered> dispatches to that plugin's handler. Registered (mod) kinds: devbench.selftest — devbench inspect-extension self-test; echoes its args..",
+      "inputSchema": {
+        "properties": {
+          "kind": {
+            "description": "default 'state'; or a registered mod kind (see kind='extensions')",
+            "enum": [
+              "state",
+              "health",
+              "ui",
+              "scene",
+              "player",
+              "registrants",
+              "extensions",
+              "devbench.selftest"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "readOnly": true
+    },
+    {
+      "name": "measure",
+      "description": "Sample frame time over a window and return { fps, meanMs, minMs, p50Ms, p95Ms, p99Ms, maxMs, frames, missedTransitions }. The benchmark primitive: pair it with `record`/`replay` so an A/B measures the change and not your hands. Takes NO engine hook — it watches the engine's own frame counter and timestamps each change with QPC, so it works on any game whose platform exposes that counter (a 503 says so plainly if it does not). Resolution is tens of microseconds and it busies one core for the window, so it is deliberately foreground-only: there is no background mode. 'missedTransitions' is reported because a caller comparing two runs has to know whether the instrument itself dropped frames.",
+      "inputSchema": {
+        "properties": {
+          "durationMs": {
+            "description": "sampling window, 200..60000, default 3000",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "readOnly": true
+    },
+    {
+      "name": "menu",
+      "description": "Detect and answer in-game menus — mirrors the shape of Skyrim's `menu` tool (same action names, same result keys) where the concept exists on Fallout. actions: 'list' (default) → { openMenus, messageBoxOpen, source, menuEvents }, answered off the same main-thread-independent signal as `inspect kind='ui'` (RE::UI::menuMap under the engine's read lock — `source` says so, and says when nothing is tracking); 'describe' → the active MessageBoxMenu's { headerText, bodyText, buttons, modal } or { messageBoxOpen: false }; 'accept' (name='index', default 0) → answers the active MessageBoxMenu by button index and closes it — the way to recover from a blocking modal (e.g. the \"this save relies on content that is no longer present\" load warning) without a headset; 'open'/'close' (requires 'name') → show/hide an engine menu by name via the UI message queue (kShow/kHide).",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "description": "default 'list'",
+            "enum": ["list", "open", "close", "describe", "accept"],
+            "type": "string"
+          },
+          "index": {
+            "description": "button index for 'accept', default 0",
+            "type": "integer"
+          },
+          "name": {
+            "description": "menu name — required for 'open'/'close'",
+            "type": "string"
+          },
+          "raw": {
+            "description": "'describe' only: also return a hex dump of MessageBoxData, for deriving the VR struct layout",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "console",
+      "description": "Run a Fallout 4 console command and return what it printed: { executed, command, compiled, captured, count, lines, blocked }. By default (capture=true) the command is compiled and run right away on the main thread, against the console's selected reference, and its output is read from the engine's console buffer in that same task, so `lines` holds this command's output only, complete even when it prints many lines at once (player.showinventory, sqv), with blank lines dropped; one call, no separate read. At most maxLines (default 200, max 5000), the most recent; `omitted` counts the rest. compiled=false means the command did not compile (the reason is in `lines`); captured=true with no lines means it printed nothing; captured=false means the buffer could not be read. `bufferNearlyFull` means lines may have been dropped by the engine's 64 KB limit, which only applies before the Console menu is first opened (the note says how to clear it). Several commands separated by ';' run in order, as in the console; `compiled` is false if any did not compile. A ForEachRef[...] block needs capture=false, which queues the line exactly as if typed; it then runs on a later frame and returns no output. `blocked` is true if a modal (MessageBoxMenu) was open at submission time — many state-machine commands (coc, ...) silently no-op behind one rather than erroring; see `menu` to describe/dismiss it. Non-UTF-8 bytes come back escaped as \\xNN.",
+      "inputSchema": {
+        "properties": {
+          "capture": {
+            "description": "default true: run it now and return its output; false queues it as if typed, with no output",
+            "type": "boolean"
+          },
+          "command": {
+            "description": "the console command, exactly as you would type it",
+            "type": "string"
+          },
+          "maxLines": {
+            "description": "most recent output lines to return, default 200, max 5000",
+            "type": "integer"
+          }
+        },
+        "required": ["command"],
+        "type": "object"
+      }
+    },
+    {
+      "name": "nodes",
+      "description": "Walk the live scene graph (NiAVObject/NiNode) — the on-demand, JSON form of the F4VR Common Framework's sDumpDataOnceNames dumps, available to any mod without an INI edit. Runs on the main thread. Every node is reported as { name, type, address, hidden } — `type` is the object's real class from its RTTI, and `address` pastes into the `memory` tool. Transforms are { pos:[x,y,z], scale } (plus rot rows when asked), rounded to 1e-4, with NaN/Inf as strings. actions: 'roots' (default) → the named starting points and what each currently holds: scene (top of the graph the player is in), player (third-person 3D), firstPerson, and on VR every RE::VRPlayerNodes slot (hmdNode, primaryWandNode, pipboyRootNIFOnlyNode, primaryWeaponScopeCamera, ...). A slot that holds something that is not a node is reported as `refused`, never followed. 'tree' (root default 'player', or address; maxDepth default 6 ≤ 64; maxNodes default 500 ≤ 5000; rotation) → nested { ..., childCount, local, world, children } — a node with unexpanded children says `depthCut`, one cut by maxNodes says `partial`, and `capped` is set at the top. 'find' (name = whole name, or contains = substring, both case-insensitive; root default 'scene'; limit default 50) → matches with their path and world transform; `limited` = more matches exist, `visitCapped` = the graph was not fully searched. 'get' (address | root | name = first match under root) → one node in full: local/world with rotation, flags, worldBound, ancestors (nearest first), children. 'geometry' (root default 'player') → a BSFadeNode's flattened geometry list with each shape's hidden bit. The framework's dump names work as root aliases: all_nodes→scene, skelly→player, fp_skelly→firstPerson, pipboy→pipboyRootNIFOnlyNode.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "description": "default 'roots'",
+            "enum": ["roots", "tree", "find", "get", "geometry"],
+            "type": "string"
+          },
+          "address": {
+            "description": "start at this node instead of a named root: an address expression as the `memory` tool takes it (e.g. a node address from an earlier result). Refused unless its RTTI says it is a NiAVObject.",
+            "type": "string"
+          },
+          "contains": {
+            "description": "find: substring of the node name, case-insensitive",
+            "type": "string"
+          },
+          "limit": {
+            "description": "find: max matches, default 50, max 500",
+            "type": "integer"
+          },
+          "maxDepth": {
+            "description": "tree: levels below the start to expand, default 6, max 64",
+            "type": "integer"
+          },
+          "maxNodes": {
+            "description": "tree: nodes to emit, default 500, max 5000",
+            "type": "integer"
+          },
+          "name": {
+            "description": "find/get: whole node name, case-insensitive",
+            "type": "string"
+          },
+          "root": {
+            "description": "named starting point (see action='roots'), case-insensitive",
+            "type": "string"
+          },
+          "rotation": {
+            "description": "tree: include rotation matrix rows in local/world",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "readOnly": true
+    }
+  ]
+}

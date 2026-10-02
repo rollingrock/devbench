@@ -1,9 +1,9 @@
 #include "ConsoleHook.h"
 
 #include "ConsoleLogCapture.h"
+#include "Recording.h"
 #include "core/EventBus.h"
 #include "core/Json.h"
-#include "Recording.h"
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>

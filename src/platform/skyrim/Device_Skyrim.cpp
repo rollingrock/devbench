@@ -30,8 +30,8 @@ namespace
 	// The engine's own render-target indices ARE RE::RENDER_TARGET values on Skyrim —
 	// unlike Fallout, where the renderer is addressed by a logical id through a remap
 	// table. That is why TargetName() below can answer and Fallout's cannot.
-	constexpr std::uint32_t kFlatTargetCount = RE::RENDER_TARGET::kTOTAL;    // 114 in this header
-	constexpr std::uint32_t kVRTargetCount = RE::RENDER_TARGET::kVRTOTAL;    // 125
+	constexpr std::uint32_t kFlatTargetCount = RE::RENDER_TARGET::kTOTAL;  // 114 in this header
+	constexpr std::uint32_t kVRTargetCount = RE::RENDER_TARGET::kVRTOTAL;  // 125
 
 	// Generated from RE/B/BSShaderRenderTargets.h; index == RENDER_TARGET value.
 	// Entries 114..124 exist only on VR.
@@ -44,12 +44,12 @@ namespace
 
 	struct Resolved
 	{
-		ID3D11Device*                  device = nullptr;
-		ID3D11DeviceContext*           context = nullptr;
+		ID3D11Device*                     device = nullptr;
+		ID3D11DeviceContext*              context = nullptr;
 		RE::BSGraphics::RenderTargetData* targets = nullptr;
-		std::uint32_t                  count = 0;
-		bool                           tried = false;
-		bool                           ok = false;
+		std::uint32_t                     count = 0;
+		bool                              tried = false;
+		bool                              ok = false;
 	};
 
 	Resolved& State()

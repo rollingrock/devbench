@@ -10,16 +10,18 @@
 
 #include "Version.h"
 
+#include <intrin.h>
 #include <memory>
 #include <set>
 #include <spdlog/sinks/basic_file_sink.h>
 
 // Load-order-proof interface entry (see HostApi::GetApiEntry). A consumer does
 // GetModuleHandle("devbench.dll") + GetProcAddress("DevBench_GetApiFunction"),
-// calls it, and receives the same GetApi the message handshake would deliver.
+// calls it, and receives the same GetApi the message handshake would deliver. The
+// return address names the caller's module for `inspect kind='registrants'`.
 extern "C" __declspec(dllexport) void* DevBench_GetApiFunction()
 {
-	return dvb::HostApi::GetApiEntry();
+	return dvb::HostApi::GetApiEntry(_ReturnAddress());
 }
 
 // devbench, Fallout 4 / Fallout 4 VR entry point.
