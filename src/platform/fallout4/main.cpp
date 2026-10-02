@@ -30,7 +30,8 @@ extern "C" __declspec(dllexport) void* DevBench_GetApiFunction()
 
 namespace
 {
-	std::unique_ptr<dvb::Server> g_server;
+	// Process-lifetime: do not join server threads during DLL detach.
+	dvb::Server* g_server = nullptr;
 
 	void InitLogging()
 	{
@@ -76,7 +77,7 @@ namespace
 
 		dvb::tools::SetAllowMemoryWrites(cfg.allowMemoryWrites);
 
-		g_server = std::make_unique<dvb::Server>("127.0.0.1", cfg.port);
+		g_server = new dvb::Server("127.0.0.1", cfg.port);
 		g_server->Events().SetFrameProvider(&dvb::game::CurrentFrame);
 		// Tools are registered BEFORE Start() so they appear on both transports from
 		// the very first request rather than racing a client that connects instantly.
@@ -123,8 +124,9 @@ namespace
 		if (!messaging)
 			return;
 		if (!messaging->RegisterListener(OnInterfaceMessage, F4SE::stl::zstring{}))
-			logs::warn("devbench: could not listen for cross-plugin interface requests at {} — "
-					   "other plugins may not be able to register tools",
+			logs::warn(
+				"devbench: could not listen for cross-plugin interface requests at {} — "
+				"other plugins may not be able to register tools",
 				a_when);
 	}
 
@@ -132,18 +134,30 @@ namespace
 	{
 		using M = F4SE::MessagingInterface;
 		switch (a_type) {
-		case M::kPostLoad:      return "kPostLoad";
-		case M::kPostPostLoad:  return "kPostPostLoad";
-		case M::kPreLoadGame:   return "kPreLoadGame";
-		case M::kPostLoadGame:  return "kPostLoadGame";
-		case M::kPreSaveGame:   return "kPreSaveGame";
-		case M::kPostSaveGame:  return "kPostSaveGame";
-		case M::kDeleteGame:    return "kDeleteGame";
-		case M::kInputLoaded:   return "kInputLoaded";
-		case M::kNewGame:       return "kNewGame";
-		case M::kGameLoaded:    return "kGameLoaded";
-		case M::kGameDataReady: return "kGameDataReady";
-		default:                return "?";
+		case M::kPostLoad:
+			return "kPostLoad";
+		case M::kPostPostLoad:
+			return "kPostPostLoad";
+		case M::kPreLoadGame:
+			return "kPreLoadGame";
+		case M::kPostLoadGame:
+			return "kPostLoadGame";
+		case M::kPreSaveGame:
+			return "kPreSaveGame";
+		case M::kPostSaveGame:
+			return "kPostSaveGame";
+		case M::kDeleteGame:
+			return "kDeleteGame";
+		case M::kInputLoaded:
+			return "kInputLoaded";
+		case M::kNewGame:
+			return "kNewGame";
+		case M::kGameLoaded:
+			return "kGameLoaded";
+		case M::kGameDataReady:
+			return "kGameDataReady";
+		default:
+			return "?";
 		}
 	}
 

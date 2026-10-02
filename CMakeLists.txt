@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.23)
 # same sources with no per-buildsystem #ifdefs.
 
 set(NAME "devbench")
-set(VERSION 1.14.0)
+set(VERSION 1.22.0)
 
 project(${NAME} VERSION ${VERSION} LANGUAGES CXX)
 

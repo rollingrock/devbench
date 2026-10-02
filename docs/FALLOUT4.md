@@ -30,15 +30,32 @@ If the port is busy the server iterates upward and writes the port it actually b
 
 ## Build
 
+Install **Visual Studio 2022 or 2026** with the **Desktop development with C++**
+workload (including a Windows SDK), and set `VCPKG_ROOT` to your vcpkg checkout.
+Choose the matching configure and build preset:
+
+| Preset | Toolset | Minimum CMake | Build directory |
+| --- | --- | --- | --- |
+| `fallout4-vs2022` | v143 | 3.23 | `build/vs2022` |
+| `fallout4-vs2026` | v145 | 4.2 | `build/vs2026` |
+
+`fallout4` is an alias for `fallout4-vs2026`. Each Visual Studio version has its own
+build directory, so switching presets does not require clearing the cache.
+
 ```powershell
 git clone --recursive <your fork>
 $env:CommonLibF4Path = "C:\path\to\CommonLibF4"   # or leave it; extern/CommonLibF4 is a submodule
-cmake --preset fallout4
-cmake --build build --config Release --target devbench
+# Choose fallout4-vs2022 or fallout4-vs2026 for both commands.
+cmake --preset fallout4-vs2026
+cmake --build --preset fallout4-vs2026 --target devbench
 ```
 
 Needs the **VR-capable** [rollingrock/CommonLibF4](https://github.com/rollingrock/CommonLibF4);
 the upstream fork builds but cannot load in Fallout 4 VR. `vcpkg` supplies the rest.
+
+For Ninja, use `fallout4-ninja` for both configure and build from the x64 developer
+shell for your chosen Visual Studio version. If switching that shell between versions,
+run `cmake --fresh --preset fallout4-ninja` to reset its shared compiler cache.
 
 To deploy on build, set `FalloutPluginTargets` to one or more game `Data` directories,
 separated by `;` — the twin of the Skyrim build's `SkyrimPluginTargets`.

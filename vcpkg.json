@@ -1,6 +1,6 @@
 {
   "name": "devbench",
-  "version-string": "1.14.0",
+  "version-string": "1.22.0",
   "description": "MCP + REST test bench host for Bethesda-engine mod development (Fallout 4 / Fallout 4 VR build)",
   "homepage": "https://github.com/alandtse/devbench",
   "license": "GPL-3.0-or-later",

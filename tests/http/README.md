@@ -30,6 +30,27 @@ $env:DEVBENCH_URL = "http://127.0.0.1:8921"; pytest tests/http -v
 DEVBENCH_URL=http://127.0.0.1:8921 pytest tests/http -v
 ```
 
+## Held-key movement checks
+
+`test_input_holds.py` is opt-in. Set `DEVBENCH_TEST_INPUT=1` and
+`DEVBENCH_URL`, then run `pytest tests/http/test_input_holds.py -v`. Load an
+unpaused development save with the player on foot and clear ground ahead.
+Avoid other input during the test. It moves the player using the configured
+Forward key, checks continued movement, and verifies that release and lease
+expiry stop it. It releases its own keys without saving or reloading.
+
+### Shutdown
+
+Run the Windows shutdown test separately. It exits Skyrim without saving and
+checks that the process terminates successfully within 30 seconds:
+
+```powershell
+$env:DEVBENCH_URL = "http://127.0.0.1:8920"
+$env:DEVBENCH_TEST_SHUTDOWN = "1"
+pytest tests/http/test_shutdown.py -v
+Remove-Item Env:DEVBENCH_TEST_SHUTDOWN
+```
+
 ## How discovery works
 
 The base URL is resolved in this order (first hit wins):

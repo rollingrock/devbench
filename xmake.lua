@@ -15,7 +15,7 @@ includes("xmake/cpp-mcp.lua")
 set_project("devbench")
 set_license("GPL-3.0")
 
-local version = "1.14.0"
+local version = "1.22.0"
 local ver = version:split("%.")
 set_version(version)
 
@@ -59,6 +59,7 @@ add_deps("commonlibsse-ng")
 add_packages("skse-menu-framework-api", "nlohmann_json")
 add_defines("_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING") -- SMF header uses std::wstring_convert
 add_defines("UNICODE", "_UNICODE", "_WINSOCKAPI_")
+add_cxflags("/utf-8", { force = true })
 add_files("src/platform/skyrim/RecordingsMenu.cpp")
 add_includedirs("src", "src/platform/skyrim")
 target_end()
@@ -71,6 +72,7 @@ set_warnings("all")
 add_deps("commonlibsse-ng")
 add_packages("fuck-api", "imgui", "simpleini", "nlohmann_json")
 add_defines("UNICODE", "_UNICODE", "_WINSOCKAPI_")
+add_cxflags("/utf-8", { force = true })
 add_files("src/platform/skyrim/RecordingsMenuFuck.cpp")
 add_includedirs("src", "src/platform/skyrim")
 target_end()
@@ -86,6 +88,10 @@ set_basename("devbench")
 -- ensure winsock2 (pulled in by cpp-mcp/httplib) wins over the legacy winsock
 -- that <Windows.h> would otherwise include via CommonLib.
 add_defines("_WINSOCKAPI_")
+
+-- see devbench-UI's identical flag for why (this target's own sources carry the same
+-- non-ASCII string literals, e.g. Server.cpp's log lines and mcp_bridge_setup's note).
+add_cxflags("/utf-8", { force = true })
 
 -- generate PDB (releasedbg handles /Zi; /DEBUG tells the linker to emit it)
 add_shflags("/DEBUG", { force = true })
@@ -160,7 +166,7 @@ set_default(false)
 set_languages("c++23")
 add_packages("nlohmann_json", "stb")
 -- "include" is on the path for src/core/HostApi.cpp's DevBenchAPI.h, added below.
-add_includedirs("src", "include")
+add_includedirs("src", "src/platform/skyrim", "include")
 add_files("tests/*.cpp")
 add_files("src/core/ToolRegistry.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/Ssim.cpp") -- exercised directly; pure logic, no game deps
@@ -174,6 +180,11 @@ add_files("src/core/Host.cpp", "src/core/Log.cpp") -- the platform seam, stubbed
 -- be invisible: both real plugin targets have an extender on the include path via
 -- their PCH, so both would keep compiling.
 add_files("src/core/HostApi.cpp", "src/core/ToolExtensions.cpp")
+add_files("src/core/KeyboardInputState.cpp")
+add_files("src/core/VRInputState.cpp")
+add_files("src/core/ConsoleCaptureLogic.cpp")
+add_files("src/core/ReplayTrajectory.cpp")
+add_files("src/core/RecordingActivity.cpp")
 add_headerfiles("tests/*.h")
 set_pcxxheader("tests/pch.h")
 add_defines("_WINSOCKAPI_")

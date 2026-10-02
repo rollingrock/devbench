@@ -3,6 +3,11 @@
 #include "core/EventBus.h"
 #include "core/Json.h"
 
+namespace RE
+{
+	class InputEvent;
+}
+
 // record: capture a manual play-through as a replayable scenario. `start` samples the
 // player pose every intervalMs on a background thread (marshaling the read to the main
 // thread) and captures a one-time scene manifest — the worldspace/cell, time of day, and
@@ -36,10 +41,23 @@ namespace dvb::Recording
 	/// Single source of truth for transitions (door, coc, fast-travel). No-op unless recording.
 	void NoteCellChange(const std::string& a_command);
 
+	/// Capture the complete normalized Skyrim input chain delivered by BSInputDeviceManager.
+	/// Every event is serialized while it is valid and stamped onto the recorder's monotonic
+	/// activity clock. No-op unless a recording is active or while DevBench is replaying.
+	void NoteInputEvents(RE::InputEvent* const* a_events);
+
+	/// Capture observable UI/lifecycle state changes on the same clock as input and pose.
+	void NoteMenuState(const std::string& a_menuName, bool a_opening);
+	void NoteLifecycleEvent(const std::string& a_event);
+
 	/// Mark whether devbench is currently replaying (teleporting the player). While true, the
 	/// pose sampler skips ticks — the replay's own setpos commands (captured via the console
 	/// hook) are the trajectory — so a recording that plays back a recipe embeds it cleanly.
 	void SetReplaying(bool a_replaying);
+
+	/// True while a recording is running (start..stop), so a caller can refuse work that would
+	/// make the capture incomparable — e.g. changing the game's time scale mid-recording.
+	bool IsActive();
 
 	/// Default settle delay (ms) inserted after a restore-load before the trajectory, so the
 	/// game settles before the player is teleported. Local/per-machine (set from config);
@@ -47,7 +65,7 @@ namespace dvb::Recording
 	void SetLoadSettleMs(int a_ms);
 
 	/// Default sample interval (ms) for record `start` when no intervalMs arg is given (e.g. the
-	/// hotkey). Local/per-machine via config (recordIntervalMs). Clamped to the 10ms floor.
+	/// hotkey). Local/per-machine via config (recordIntervalMs). Clamped to the supported range.
 	void SetDefaultIntervalMs(int a_ms);
 
 	/// Scene-coupling defaults from config: the age thresholds (ms) that map a recipe's
@@ -80,6 +98,8 @@ namespace dvb::Recording
 	/// isn't registered throws ToolError(409) before anything runs, unless a_args.force or the
 	/// capability's own allowNative permits the low-fidelity native fallback.
 	json BuildReplaySteps(const json& a_args);
+
+	bool WantsPoseDriver(const json& a_args);
 
 	/// `recordings` tool: manage the on-disk recording library (the data layer an in-game menu —
 	/// SMF/FUCK/built-in — sits on). action = list | describe | validate | delete.

@@ -29,7 +29,16 @@ namespace dvb
 		// from the generated Version.h so the core stays independent of the build's
 		// configured headers — the unit-test target links core files with no Version.h
 		// on its include path.
-		void Init(ToolRegistry& a_registry, EventBus& a_events, unsigned int a_buildNumber);
+		// Optional platform implementation of the time-scale ABI. A platform without
+		// callbacks rejects SetTimeScale and reports NaN from GetTimeScale.
+		struct TimeScaleCallbacks
+		{
+			bool (*set)(float, std::uint32_t, const char*) = nullptr;
+			float (*get)() = nullptr;
+		};
+
+		void Init(ToolRegistry& a_registry, EventBus& a_events, unsigned int a_buildNumber,
+			TimeScaleCallbacks a_timeScale = {});
 
 		// Load-order-proof alternative to the messaging handshake: the platform
 		// exports a plain C function that returns this same GetApi pointer, so a
@@ -73,7 +82,7 @@ namespace dvb
 
 		// Every successful tool/extension registration seen so far, oldest first. Thread-safe.
 		// There is no reliable per-registration caller identity (the C-ABI interface is one
-		// shared singleton — see ROADMAP.md's "Event source tagging" item), so this cannot be
+		// shared singleton), so this cannot be
 		// joined against Consumers() by plugin name; both lists are exposed side by side instead.
 		std::vector<Registration> Registrations();
 	}

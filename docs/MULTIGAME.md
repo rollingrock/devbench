@@ -33,12 +33,12 @@ added rather than the call site changed.
 Not a guess — measured across the 1.14.0 tree, counting references to `RE::` / `SKSE::`
 per file:
 
-| Already game-agnostic | Lines | Game-coupled | Lines |
-| --- | ---: | --- | ---: |
-| `ToolRegistry`, `EventBus`, `ToolExtensions` | ~420 | `Tools.cpp` (107 game refs) | 2418 |
-| `McpAdapter`, `RestAdapter`, `McpContent`, `Server` | ~525 | `Papyrus.cpp` | 599 |
-| `Config`, `Autorun`, `Json`, `Ssim`, `RecordingsView` | ~680 | `GameEvents`, `ConsoleHook`, `InputHotkeys`, `main` | ~520 |
-| `Recording` (11 refs / 1014 lines), `Capture` (5 / 727) | mostly portable | | |
+| Already game-agnostic                                   |           Lines | Game-coupled                                        | Lines |
+| ------------------------------------------------------- | --------------: | --------------------------------------------------- | ----: |
+| `ToolRegistry`, `EventBus`, `ToolExtensions`            |            ~420 | `Tools.cpp` (107 game refs)                         |  2418 |
+| `McpAdapter`, `RestAdapter`, `McpContent`, `Server`     |            ~525 | `Papyrus.cpp`                                       |   599 |
+| `Config`, `Autorun`, `Json`, `Ssim`, `RecordingsView`   |            ~680 | `GameEvents`, `ConsoleHook`, `InputHotkeys`, `main` |  ~520 |
+| `Recording` (11 refs / 1014 lines), `Capture` (5 / 727) | mostly portable |                                                     |       |
 
 The infrastructure was already common. The **tool bodies** are the game-specific part,
 and even inside them the split is uneven: `Recording` and `Capture` are 98% pure logic
@@ -79,12 +79,12 @@ Two details worth flagging in review:
 
 Fallout 4 support is four files:
 
-| File | Lines | What it is |
-| --- | ---: | --- |
-| `platform/fallout4/Fallout4Host.cpp` | ~125 | the three seams |
-| `platform/fallout4/MainThread.cpp` | ~105 | F4SE task marshalling (same failure taxonomy as Skyrim's) |
-| `platform/fallout4/Tools_Fallout4.cpp` | ~190 | `inspect`, `console` |
-| `platform/fallout4/main.cpp` | ~120 | F4SE entry point |
+| File                                   | Lines | What it is                                                |
+| -------------------------------------- | ----: | --------------------------------------------------------- |
+| `platform/fallout4/Fallout4Host.cpp`   |  ~125 | the three seams                                           |
+| `platform/fallout4/MainThread.cpp`     |  ~105 | F4SE task marshalling (same failure taxonomy as Skyrim's) |
+| `platform/fallout4/Tools_Fallout4.cpp` |  ~190 | `inspect`, `console`                                      |
+| `platform/fallout4/main.cpp`           |  ~120 | F4SE entry point                                          |
 
 One DLL covers Fallout 4 **and** Fallout 4 VR, the way CommonLibSSE-NG covers SE/AE/VR:
 CommonLibF4 (the [rollingrock fork](https://github.com/rollingrock/CommonLibF4), which is
@@ -92,9 +92,9 @@ the VR-capable one) resolves per-runtime addresses at load.
 
 Default ports became per game **and** runtime, since two games can now be up at once:
 
-| | flat | VR |
-| --- | --- | --- |
-| skyrim | 8920 | 8921 |
+|          | flat | VR   |
+| -------- | ---- | ---- |
+| skyrim   | 8920 | 8921 |
 | fallout4 | 8930 | 8931 |
 
 `InstanceIdentity` (shared by `GET /api/health` and `inspect kind='state'`) gained `game`
@@ -134,8 +134,8 @@ This is the half of a debugging loop that a gameplay-oriented bench cannot reach
 is what turns "attach x64dbg, find the struct, read eight bytes, detach" into one call an
 agent can make unattended. Four decisions in it are worth keeping in any review:
 
-1. **Every access is SEH-guarded.** A bad address is a `400` that *names the faulting
-   address*, never a CTD. A probe whose only outcomes are "the answer" and "failed" cannot
+1. **Every access is SEH-guarded.** A bad address is a `400` that _names the faulting
+   address_, never a CTD. A probe whose only outcomes are "the answer" and "failed" cannot
    tell a wrong pointer from an absent one.
 2. **RVAs are reported only for addresses genuinely inside the image.** A heap pointer
    gets `"heap": true` instead. An RVA for a heap object pastes into Ghidra as a
@@ -157,7 +157,7 @@ Not just devbench's. The mod being debugged is usually not devbench.
 
 The capability with no equivalent upstream, and the one that is genuinely hard to
 rebuild from scratch. A screenshot shows the final image; this shows the buffers that
-*produced* it — the G-buffer, the light accumulation, the shadow map — which is where a
+_produced_ it — the G-buffer, the light accumulation, the shadow map — which is where a
 rendering bug actually lives.
 
 ```
@@ -174,11 +174,11 @@ those three functions.
 Four decisions in it are load-bearing, each paid for:
 
 1. **`IsNonFinite` and `IsDark` are separate calls, and a test enforces it.** A NaN
-   displays black but has the *largest possible* exponent, so an exponent-threshold
+   displays black but has the _largest possible_ exponent, so an exponent-threshold
    "is it dark" test classifies NaN as **bright**. That is not a hypothetical: 12,000+
    readbacks across five sessions all reported "0 dark" against a visibly black screen,
    and nine innocent suspects were eliminated against that blind instrument.
-   `tests/Format_test.cpp` asserts the trap — `IsDark` must *not* catch NaN — so the two
+   `tests/Format_test.cpp` asserts the trap — `IsDark` must _not_ catch NaN — so the two
    can never be helpfully merged back together.
 2. **Non-finite pixels are painted MAGENTA in dumps, not clamped to white.** Clamped, a
    NaN-filled buffer is indistinguishable from a legitimately overbright one; the first
@@ -198,9 +198,8 @@ produces a plausible image that lies.
 ### `measure` — frame-time percentiles, no hook
 
 `{ fps, meanMs, minMs, p50Ms, p95Ms, p99Ms, maxMs, frames, missedTransitions }` over a
-window. This is the ROADMAP's "**`measure` primitive** — sample frametime over a window →
-min/avg/p95/p99 (the benchmark primitive)", and it needs **no engine hook**: it watches
-the frame counter the platform already exposes and timestamps each change with QPC.
+window. This benchmark primitive needs **no engine hook**: it watches the frame counter
+the platform already exposes and timestamps each change with QPC.
 
 It reports its own limitations rather than hiding them — `missedTransitions` when the
 counter jumped by more than one, the sampling method in every result, and a 503 (not a
@@ -214,13 +213,13 @@ on its own.
 
 ### Still to bring over
 
-- **GPU timestamp stage timers** — per-stage GPU *and* CPU ms with disjoint handling.
+- **GPU timestamp stage timers** — per-stage GPU _and_ CPU ms with disjoint handling.
   Deferred deliberately: it needs instrumentation points, which means exposing it through
   the C-ABI so a mod can bracket its own passes. The C-ABI is no longer the blocker (§7 —
   it is game-neutral now); the instrumentation points still have to be designed, and a
   `gputimer` tool with nothing registered would be vaporware.
 - **Depth/stencil and cube targets.** Only 2D colour targets are enumerated.
-- **Named targets on Fallout.** The engine addresses targets by *logical* id through
+- **Named targets on Fallout.** The engine addresses targets by _logical_ id through
   RenderTargetManager's remap table, a different index space from the physical slots.
   `TargetName()` returns "" rather than a name that might belong to a different buffer.
 
@@ -264,14 +263,14 @@ that claims less:
 
 ## 7. Open questions for the merge
 
-- **Naming.** `RegisterCoreTools` in `platform/skyrim/Tools.cpp` now registers *game*
+- **Naming.** `RegisterCoreTools` in `platform/skyrim/Tools.cpp` now registers _game_
   tools while `tools::RegisterCommonTools` registers the core ones. That is backwards and
   should be renamed; it was left alone here to keep the diff about the split.
 - ~~**`DevBenchAPI.h` is Skyrim-typed**~~ — **SETTLED, and it turned out not to need a
   design.** The option taken was neither per-game headers nor a shim: the header simply
   stopped including an extender. Every declaration in it (message id, function-pointer
   types, vtable) was already plain C++; `<RE/Skyrim.h>` + `<SKSE/SKSE.h>` were only there
-  for `GetDevBenchInterface001`, which lives in the *consumer-only* `DevBenchAPI.cpp` —
+  for `GetDevBenchInterface001`, which lives in the _consumer-only_ `DevBenchAPI.cpp` —
   and SKSE and F4SE spell that one dispatch identically, so that file picks its extender
   with `__has_include` plus a `DEVBENCHAPI_GAME_*` override.
 
@@ -288,6 +287,7 @@ that claims less:
     `game::CurrentFrame`. Without that, a re-coupling would have been invisible: both real
     plugin targets have an extender on the include path via their PCH and would have kept
     building.
+
 - **Should the core become its own repo / vcpkg port?** Argument for: Starfield next, and
   `devbench-api` is already a port. Argument against: one repo is exactly what stops the
   divergence this branch exists to prevent. Recommendation is to stay one repo until a

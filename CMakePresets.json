@@ -1,12 +1,15 @@
 {
 	"version": 3,
+	"cmakeMinimumRequired": {
+		"major": 3,
+		"minor": 23,
+		"patch": 0
+	},
 	"configurePresets": [
 		{
 			"name": "base",
 			"hidden": true,
 			"binaryDir": "${sourceDir}/build",
-			"generator": "Visual Studio 17 2022",
-			"architecture": "x64",
 			"cacheVariables": {
 				"CMAKE_BUILD_TYPE": "Release",
 				"CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>",
@@ -22,13 +25,40 @@
 		},
 		{
 			"name": "fallout4",
-			"displayName": "Fallout 4 / Fallout 4 VR (F4SE)",
-			"inherits": ["base", "vcpkg"]
+			"displayName": "Fallout 4 / Fallout 4 VR (F4SE, default: VS 2026)",
+			"inherits": "fallout4-vs2026"
+		},
+		{
+			"name": "fallout4-vs2026",
+			"displayName": "Fallout 4 / Fallout 4 VR (F4SE, VS 2026)",
+			"generator": "Visual Studio 18 2026",
+			"architecture": "x64",
+			"toolset": "v145",
+			"inherits": [
+				"base",
+				"vcpkg"
+			],
+			"binaryDir": "${sourceDir}/build/vs2026"
+		},
+		{
+			"name": "fallout4-vs2022",
+			"displayName": "Fallout 4 / Fallout 4 VR (F4SE, VS 2022)",
+			"generator": "Visual Studio 17 2022",
+			"architecture": "x64",
+			"toolset": "v143",
+			"inherits": [
+				"base",
+				"vcpkg"
+			],
+			"binaryDir": "${sourceDir}/build/vs2022"
 		},
 		{
 			"name": "fallout4-ninja",
 			"displayName": "Fallout 4 / Fallout 4 VR (F4SE, Ninja)",
-			"inherits": ["base", "vcpkg"],
+			"inherits": [
+				"base",
+				"vcpkg"
+			],
 			"generator": "Ninja",
 			"binaryDir": "${sourceDir}/build-ninja"
 		}
@@ -37,6 +67,16 @@
 		{
 			"name": "fallout4",
 			"configurePreset": "fallout4",
+			"configuration": "Release"
+		},
+		{
+			"name": "fallout4-vs2026",
+			"configurePreset": "fallout4-vs2026",
+			"configuration": "Release"
+		},
+		{
+			"name": "fallout4-vs2022",
+			"configurePreset": "fallout4-vs2022",
 			"configuration": "Release"
 		},
 		{

@@ -1,18 +1,22 @@
 #include "Autorun.h"
 #include "Capture.h"
-#include "core/Config.h"
 #include "ConsoleHook.h"
+#include "FreeCamera.h"
 #include "GameEvents.h"
-#include "core/GameState.h"
-#include "core/HostApi.h"
 #include "InputHotkeys.h"
+#include "KeyboardInput.h"
 #include "Recording.h"
 #include "RecordingsMenu.h"
-#include "core/Server.h"
 #include "StallWatchdog.h"
+#include "TimeScaleControl.h"
 #include "Tools.h"
-#include "core/tools/CommonTools.h"
+#include "VRInput.h"
 #include "Version.h"
+#include "core/Config.h"
+#include "core/GameState.h"
+#include "core/HostApi.h"
+#include "core/Server.h"
+#include "core/tools/CommonTools.h"
 
 #include <cstring>
 #include <memory>
@@ -25,9 +29,10 @@ namespace dvb::platform
 
 namespace
 {
-	// Constructed at kDataLoaded with the configured port (null if disabled via config).
-	std::unique_ptr<dvb::Server> g_server;
-	dvb::Config                  g_config;  // captured at kPostLoad; used at kInputLoaded
+	// Process-lifetime: DLL detach runs after Windows terminates the server's workers,
+	// so destroying it there would wait for threads that can no longer finish.
+	dvb::Server* g_server = nullptr;
+	dvb::Config  g_config;  // captured at kPostLoad; used at kInputLoaded
 
 	void InitLogging()
 	{
@@ -71,6 +76,10 @@ namespace
 	{
 		if (!a_msg)
 			return;
+		if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame)
+			dvb::FreeCamera::BeginLoad();
+		else if (a_msg->type == SKSE::MessagingInterface::kNewGame || a_msg->type == SKSE::MessagingInterface::kPostLoadGame)
+			dvb::FreeCamera::EndLoad();
 		// Init at kPostLoad, not kDataLoaded: SKSE runs ALL plugins' kPostLoad before any
 		// kDataLoaded, so the cross-plugin interface is ready when consumer mods request it
 		// at their kDataLoaded (otherwise plugin order can make us answer too late — a
@@ -86,7 +95,7 @@ namespace
 				// registers its self-test tool) BEFORE Start() so they appear on both
 				// transports from the first request; then attach game-event sources.
 				g_config = cfg;  // kept for kInputLoaded (input sink registers later)
-				g_server = std::make_unique<dvb::Server>("127.0.0.1", cfg.port);
+				g_server = new dvb::Server("127.0.0.1", cfg.port);
 				g_server->Events().SetFrameProvider(&dvb::game::CurrentFrame);
 				dvb::tools::RegisterCommonTools(g_server->Tools(), g_server->Events());
 				dvb::tools::SetAllowMemoryWrites(cfg.allowMemoryWrites);
@@ -98,7 +107,15 @@ namespace
 				dvb::Capture::SetEvents(&g_server->Events());
 				dvb::Capture::SetDefaults(cfg);
 				dvb::ArmAutoRun(g_server->Tools(), cfg.autoRunPath, cfg.autoRunRestoreScene);
-				dvb::HostApi::Init(g_server->Tools(), g_server->Events(), DEVBENCH_BUILD_NUMBER);
+				dvb::HostApi::Init(g_server->Tools(), g_server->Events(), DEVBENCH_BUILD_NUMBER, {
+																									 .set = +[](float scale, std::uint32_t leaseMs, const char* owner) {
+																										 const auto validation = dvb::TimeScaleControl::Validate(scale, false, false);
+																										 return validation.accepted && dvb::TimeScaleControl::Set(validation.value,
+																																		   static_cast<std::int64_t>(leaseMs), owner && *owner ? owner : "api:anonymous", false)
+																										                                   .ok;
+																									 },
+																									 .get = &dvb::TimeScaleControl::Effective,
+																								 });
 				g_server->Start();
 				dvb::InstallGameEvents(g_server->Events());
 				dvb::StallWatchdog::Start(g_server->Events(), cfg.stallWatchdogMs);
@@ -113,8 +130,11 @@ namespace
 		}
 		// Register input hotkeys at kInputLoaded — BSInputDeviceManager is null at kPostLoad,
 		// so registering then silently no-ops. kInputLoaded fires once the input subsystem is up.
-		if (a_msg->type == SKSE::MessagingInterface::kInputLoaded && g_server)
+		if (a_msg->type == SKSE::MessagingInterface::kInputLoaded && g_server) {
+			dvb::MarkKeyboardInputReady();
+			dvb::MarkVRInputReady(g_server->Events());
 			dvb::InstallInputHotkeys(g_server->Tools(), g_config);
+		}
 
 		// Register the optional in-game menus at kDataLoaded (the frameworks are up by then). Each
 		// is inert if its framework isn't installed; both drive devbench via dvb::RunTool, so they
@@ -125,6 +145,16 @@ namespace
 		}
 
 		if (g_server) {
+			// Never carry a synthetic held key across a scene reset. This callback is on Skyrim's
+			// main thread, so the keyboard layer hands cleanup to a worker and returns immediately.
+			if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame) {
+				dvb::ReleaseKeyboardInputForLifecycle("preLoadGame");
+				dvb::ReleaseVRInputForLifecycle("preLoadGame");
+			} else if (a_msg->type == SKSE::MessagingInterface::kNewGame) {
+				dvb::ReleaseKeyboardInputForLifecycle("newGame");
+				dvb::ReleaseVRInputForLifecycle("newGame");
+			}
+
 			// Publish lifecycle events (dataLoaded and later load/save/new-game).
 			dvb::OnSKSEMessage(a_msg->type);
 			// Remember the save the player loaded or just wrote, so a recording started

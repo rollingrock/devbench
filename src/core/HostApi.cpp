@@ -9,15 +9,17 @@
 #include "core/ToolRegistry.h"
 
 #include <ctime>
+#include <limits>
 #include <mutex>
 
 namespace dvb::HostApi
 {
 	namespace
 	{
-		ToolRegistry* g_registry = nullptr;
-		EventBus*     g_events = nullptr;
-		unsigned int  g_buildNumber = 0;  // supplied by the platform at Init
+		TimeScaleCallbacks g_timeScale;
+		ToolRegistry*      g_registry = nullptr;
+		EventBus*          g_events = nullptr;
+		unsigned int       g_buildNumber = 0;  // supplied by the platform at Init
 
 		// Registrant ledger: who asked for the C-ABI interface, and what they registered
 		// through it. Both grow only (append-only, process lifetime) — a plugin unregistering
@@ -96,7 +98,7 @@ namespace dvb::HostApi
 				ToolDescriptor d;
 				d.name = a_name;
 				d.description = desc.value("description", std::string{});
-				d.inputSchema = desc.value("inputSchema", json::object());
+				d.inputSchema = desc.value("inputSchema", DefaultInputSchema());
 				d.readOnly = desc.value("readOnly", false);
 
 				const bool isNew = g_registry->Register(std::move(d), MakeHandler(a_handler, a_ctx));
@@ -143,6 +145,16 @@ namespace dvb::HostApi
 				}
 				g_events->Publish(a_topic, std::move(payload));
 			}
+
+			bool SetTimeScale(float a_scale, std::uint32_t a_leaseMs, const char* a_owner) override
+			{
+				return g_timeScale.set && g_timeScale.set(a_scale, a_leaseMs, a_owner);
+			}
+
+			float GetTimeScale() override
+			{
+				return g_timeScale.get ? g_timeScale.get() : std::numeric_limits<float>::quiet_NaN();
+			}
 		};
 
 		Interface g_interface;
@@ -186,11 +198,12 @@ namespace dvb::HostApi
 		}
 	}
 
-	void Init(ToolRegistry& a_registry, EventBus& a_events, unsigned int a_buildNumber)
+	void Init(ToolRegistry& a_registry, EventBus& a_events, unsigned int a_buildNumber, TimeScaleCallbacks a_timeScale)
 	{
 		g_registry = &a_registry;
 		g_events = &a_events;
 		g_buildNumber = a_buildNumber;
+		g_timeScale = a_timeScale;
 		RegisterSelfTest();
 		RegisterExtensionSelfTests();
 	}

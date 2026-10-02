@@ -1,59 +1,259 @@
 #include "ConsoleLogCapture.h"
 
+#include "core/GameState.h"
+#include "core/MainThread.h"
+#include "core/ToolRegistry.h"
+
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <mutex>
+#include <optional>
+#include <thread>
 
 namespace dvb::ConsoleLogCapture
 {
-	Result ReadFenced(size_t a_maxLines)
+	namespace
+	{
+		using namespace std::chrono;
+		using Clock = steady_clock;
+
+		constexpr auto kLookInterval = milliseconds(8);
+		constexpr auto kLookTimeout = milliseconds(2000);
+		constexpr auto kCaptureDeadline = seconds(30);
+		constexpr int  kBeginLooks = 60;
+		constexpr int  kCommandLooks = 25;
+		constexpr int  kEndLooks = 60;
+
+		enum class Source
+		{
+			kNone,
+			kBuffer,
+			kSampler,
+		};
+
+		// Sampler state and the buffer baseline are main thread only.
+		LineSampler         g_sampler;
+		std::size_t         g_bufferBaseline = 0;
+		int                 g_lastFrame = -1;
+		std::size_t         g_engineFrames = 0;
+		std::atomic<Source> g_source{ Source::kNone };
+		std::atomic<bool>   g_timedOut{ false };
+		std::mutex          g_captureMutex;
+
+		std::string CurrentLine()
+		{
+			auto* cl = RE::ConsoleLog::GetSingleton();
+			if (!cl)
+				return {};
+			return std::string(cl->lastMessage, ::strnlen(cl->lastMessage, sizeof(cl->lastMessage)));
+		}
+
+		std::string_view BufferText()
+		{
+			auto* cl = RE::ConsoleLog::GetSingleton();
+			if (!cl)
+				return {};
+			const char* raw = cl->buffer.c_str();
+			return raw ? std::string_view(raw) : std::string_view{};
+		}
+
+		bool Has(std::string_view a_text, const char* a_token)
+		{
+			return a_text.find(a_token) != std::string_view::npos;
+		}
+
+		// A buffer that shrank below the baseline was drained, so all of it is newer.
+		std::size_t BufferFromOffset(std::size_t a_bufferSize)
+		{
+			return a_bufferSize < g_bufferBaseline ? 0 : g_bufferBaseline;
+		}
+
+		struct LookView
+		{
+			LineSampler::Seen seen = LineSampler::Seen::kNothing;
+			bool              samplerSawBegin = false;
+			bool              samplerSawEnd = false;
+			bool              bufferHasBegin = false;
+			bool              bufferHasEnd = false;
+		};
+
+		LookView LookAtSources()
+		{
+			const int frame = game::CurrentFrame();
+			if (frame != g_lastFrame) {
+				++g_engineFrames;
+				g_lastFrame = frame;
+			}
+			LookView view;
+			view.seen = g_sampler.Observe(CurrentLine());
+			view.samplerSawBegin = g_sampler.SawBegin();
+			view.samplerSawEnd = g_sampler.SawEnd();
+			const auto buffer = BufferText();
+			const auto fence = FindFence(buffer, BufferFromOffset(buffer.size()));
+			view.bufferHasBegin = fence.hasBegin;
+			view.bufferHasEnd = fence.hasEnd;
+			return view;
+		}
+
+		void Queue(std::string a_command)
+		{
+			if (auto* task = SKSE::GetTaskInterface())
+				task->AddTask([c = std::move(a_command)]() { RE::Console::ExecuteCommand(c.c_str()); });
+		}
+
+		void QueueThenEndMarker(std::string a_command)
+		{
+			if (auto* task = SKSE::GetTaskInterface())
+				task->AddTask([c = std::move(a_command)]() {
+					RE::Console::ExecuteCommand(c.c_str());
+					RE::Console::ExecuteCommand(kMarkerEnd);
+				});
+		}
+
+		// Empty when the main thread does not answer, e.g. during a load screen.
+		std::optional<LookView> Look()
+		{
+			std::this_thread::sleep_for(kLookInterval);
+			try {
+				LookView view;
+				MainThread::RunAndWait([&view]() -> json {
+					view = LookAtSources();
+					return true;
+				},
+					kLookTimeout);
+				return view;
+			} catch (const ToolError& e) {
+				logs::warn("devbench: console capture stopped looking: {}", e.what());
+				return std::nullopt;
+			}
+		}
+
+		template <class Done>
+		bool WaitFor(Clock::time_point a_deadline, int a_looks, Done a_done)
+		{
+			for (int i = 0; i < a_looks && Clock::now() < a_deadline; ++i) {
+				const auto view = Look();
+				if (!view)
+					return false;
+				if (a_done(*view))
+					return true;
+			}
+			return false;
+		}
+
+		Source ChooseSource(Clock::time_point a_deadline)
+		{
+			Queue(kMarkerBegin);
+			SourceChooser chooser;
+			auto          choice = SourceChooser::Choice::kUndecided;
+			WaitFor(a_deadline, kBeginLooks, [&](const LookView& v) {
+				choice = chooser.Look(v.bufferHasBegin, v.samplerSawBegin);
+				return choice != SourceChooser::Choice::kUndecided;
+			});
+			switch (choice) {
+			case SourceChooser::Choice::kBuffer:
+				return Source::kBuffer;
+			case SourceChooser::Choice::kSampler:
+				return Source::kSampler;
+			default:
+				return Source::kNone;
+			}
+		}
+
+		bool CaptureFromBuffer(const std::string& a_command, Clock::time_point a_deadline)
+		{
+			QueueThenEndMarker(a_command);
+			return WaitFor(a_deadline, kEndLooks, [](const LookView& v) { return v.bufferHasEnd; });
+		}
+
+		// The sampler keeps one line per look, so the command and the end marker go on separate ticks.
+		bool CaptureFromSampler(const std::string& a_command, Clock::time_point a_deadline)
+		{
+			Queue(a_command);
+			QuietDetector quiet;
+			WaitFor(a_deadline, kCommandLooks, [&](const LookView& v) {
+				return quiet.Look(v.seen == LineSampler::Seen::kLine);
+			});
+			Queue(kMarkerEnd);
+			return WaitFor(a_deadline, kEndLooks, [](const LookView& v) { return v.samplerSawEnd; });
+		}
+	}
+
+	bool RunFencedCapture(const std::string& a_command)
+	{
+		std::unique_lock<std::mutex> owned(g_captureMutex, std::try_to_lock);
+		if (!owned.owns_lock())
+			throw ToolError(409, "a console capture is already running; retry when it finishes");
+
+		g_source.store(Source::kNone);
+		g_timedOut.store(false);
+		MainThread::RunAndWait([]() -> json {
+			g_sampler.Reset(CurrentLine());
+			g_bufferBaseline = BufferText().size();
+			g_lastFrame = -1;
+			g_engineFrames = 0;
+			return true;
+		},
+			kLookTimeout);
+
+		const auto deadline = Clock::now() + kCaptureDeadline;
+		const auto source = ChooseSource(deadline);
+		if (source == Source::kNone) {
+			g_timedOut.store(true);
+			throw ToolError(504, "console capture never saw its begin marker; the command was not run");
+		}
+		g_source.store(source);
+
+		const bool finished = source == Source::kBuffer ? CaptureFromBuffer(a_command, deadline) :
+		                                                  CaptureFromSampler(a_command, deadline);
+		if (!finished) {
+			logs::warn("devbench: console capture did not see its end marker");
+			g_timedOut.store(true);
+		}
+		return finished;
+	}
+
+	Result ReadFenced(std::size_t a_maxLines)
 	{
 		Result out;
-		auto*  cl = RE::ConsoleLog::GetSingleton();
-		if (!cl)
-			return out;
-		const char* raw = cl->buffer.c_str();  // ConsoleLog::buffer — the accumulated scrollback
-		if (!raw || !*raw)
-			return out;
-		const std::string buf(raw);
+		out.timedOut = g_timedOut.load();
+		out.ringLines = g_sampler.Lines().size();
+		out.samples = g_sampler.Samples();
+		out.ticks = g_sampler.Ticks();
+		out.engineFrames = g_engineFrames;
 
-		// Most recent window: the LAST begin marker, then the first end marker after it.
-		const size_t b = buf.rfind(kMarkerBegin);
-		if (b == std::string::npos)
-			return out;
-		out.sawBegin = true;
-		const size_t e = buf.find(kMarkerEnd, b + std::strlen(kMarkerBegin));
-
-		// Output is between the end of the begin-marker line and the start of the end-marker
-		// line (both marker lines excluded).
-		size_t start = buf.find('\n', b);
-		start = (start == std::string::npos) ? buf.size() : start + 1;
-		size_t stop;
-		if (e == std::string::npos) {
-			stop = buf.size();  // end marker not in the buffer yet (still draining / evicted)
-		} else {
-			out.sawEnd = true;
-			const size_t ls = buf.rfind('\n', e);  // start of the end-marker line
-			stop = (ls == std::string::npos || ls < start) ? start : ls;
+		if (auto* ui = RE::UI::GetSingleton()) {
+			out.consoleMenuExists = ui->GetMenu(RE::Console::MENU_NAME).get() != nullptr;
+			out.consoleMenuOpen = ui->IsMenuOpen(RE::Console::MENU_NAME);
 		}
+		out.consoleMode = RE::ConsoleLog::IsConsoleMode();
 
-		// Split [start, stop) into trimmed, non-empty lines.
-		const std::string region = buf.substr(start, stop - start);
-		std::string       line;
-		auto              flush = [&]() {
-			if (!line.empty()) {
-				out.lines.push_back(line);
-				line.clear();
-			}
-		};
-		for (const char c : region) {
-			if (c == '\n' || c == '\r')
-				flush();
-			else
-				line += c;
+		auto* cl = RE::ConsoleLog::GetSingleton();
+		if (!cl) {
+			out.consoleLogNull = true;
+			return out;
 		}
-		flush();
+		out.lastMessage = CurrentLine();
+		out.lastMessageHasBegin = Has(out.lastMessage, kMarkerBegin);
+		const auto buffer = BufferText();
+		out.bufferEmpty = buffer.empty();
+		out.bufferLen = buffer.size();
+		out.bufferHasBegin = Has(buffer, kMarkerBegin);
 
-		if (out.lines.size() > a_maxLines)
-			out.lines.erase(out.lines.begin(), out.lines.end() - static_cast<std::ptrdiff_t>(a_maxLines));
+		const Source source = g_source.load();
+		Slice        slice;
+		if (source == Source::kSampler) {
+			slice = SliceFencedLines(g_sampler.Lines(), a_maxLines);
+			out.source = "sampler";
+			out.lossPossible = true;
+		} else if (source == Source::kBuffer || out.bufferHasBegin) {
+			slice = SliceFencedText(buffer, a_maxLines, BufferFromOffset(buffer.size()));
+			out.source = "buffer";
+		}
+		out.sawBegin = slice.sawBegin;
+		out.sawEnd = slice.sawEnd;
+		out.lines = std::move(slice.lines);
 		return out;
 	}
 }
