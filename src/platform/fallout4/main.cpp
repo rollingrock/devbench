@@ -81,6 +81,7 @@ namespace
 
 		g_server = new dvb::Server("127.0.0.1", cfg.port);
 		g_server->Events().SetFrameProvider(&dvb::game::CurrentFrame);
+		g_server->Tools().SetStrictArgs(cfg.strictToolArgs);
 		// Tools are registered BEFORE Start() so they appear on both transports from
 		// the very first request rather than racing a client that connects instantly.
 		dvb::tools::RegisterCommonTools(g_server->Tools(), g_server->Events());
@@ -92,7 +93,26 @@ namespace
 		// Start(), so a consumer that registers a tool the instant it gets the interface
 		// finds a live registry rather than racing the server's first request.
 		dvb::HostApi::Init(g_server->Tools(), g_server->Events(), DEVBENCH_BUILD_NUMBER);
-		g_server->Start();
+		// Never let a throw here escape into F4SE's message dispatch: as on Skyrim, that
+		// aborts the remaining listeners and leaves every later-loaded plugin without the
+		// message. A dev tool failing to start must not take the load order down with it.
+		try {
+			g_server->Start();
+		} catch (const std::exception& e) {
+			logs::error("devbench: server failed to start: {}", e.what());
+			try {
+				g_server->Stop();
+			} catch (...) {
+				logs::error("devbench: Stop() also failed");
+			}
+		} catch (...) {
+			logs::error("devbench: server failed to start (unknown exception)");
+			try {
+				g_server->Stop();
+			} catch (...) {
+				logs::error("devbench: Stop() also failed");
+			}
+		}
 		// Try here so the "menu" event stream starts as early as it can, but do NOT
 		// assume it succeeds: RE::UI is NOT up at kPostLoad on FO4VR. The first version
 		// of this asserted it was, swallowed the null, and shipped a detector that

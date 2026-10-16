@@ -15,7 +15,7 @@ includes("xmake/cpp-mcp.lua")
 set_project("devbench")
 set_license("GPL-3.0")
 
-local version = "1.22.0"
+local version = "1.28.0"
 local ver = version:split("%.")
 set_version(version)
 
@@ -187,6 +187,12 @@ add_files("src/core/HostApi.cpp", "src/core/ToolExtensions.cpp")
 add_files("src/core/KeyboardInputState.cpp") -- key resolution + lease ownership; pure logic
 add_files("src/core/VRInputState.cpp") -- atomic tracked-set validation/encoding; pure logic
 add_files("src/core/ConsoleCaptureLogic.cpp") -- console capture slicing + line sampler; pure logic
+add_files("src/core/HeldLightsLogic.cpp") -- held-light search coverage and counts; pure logic
+add_files("src/core/PapyrusDefaults.cpp") -- declared optional-parameter defaults for papyrus call; pure logic
+add_files("src/core/CameraOrbitLogic.cpp") -- camera orbit admission, baseline and restoration; pure logic
+add_files("src/core/CameraFrameLogic.cpp") -- camera frame pose math; pure logic
+add_files("src/core/PrologueScan.cpp") -- relocatable-prologue check for the console print hook; pure logic
+add_files("src/core/InspectLogic.cpp") -- lights scope/budget/ordering and the handsReady predicate; pure logic
 add_files("src/core/ReplayTrajectory.cpp") -- pose keyframe sampling/interpolation; pure logic
 add_files("src/core/RecordingActivity.cpp") -- activity contract + input/trajectory interleave; pure logic
 add_headerfiles("tests/*.h")

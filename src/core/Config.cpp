@@ -48,6 +48,7 @@ namespace dvb
 				{ "captureSettleMs", a_cfg.captureSettleMs },
 				{ "stallWatchdogMs", a_cfg.stallWatchdogMs },
 				{ "allowMemoryWrites", a_cfg.allowMemoryWrites },
+				{ "strictToolArgs", a_cfg.strictToolArgs },
 			};
 			out << j.dump(2) << '\n';
 		}
@@ -138,6 +139,7 @@ namespace dvb
 			cfg.captureSettleMs = j.value("captureSettleMs", cfg.captureSettleMs);
 			cfg.stallWatchdogMs = j.value("stallWatchdogMs", cfg.stallWatchdogMs);
 			cfg.allowMemoryWrites = j.value("allowMemoryWrites", cfg.allowMemoryWrites);
+			cfg.strictToolArgs = j.value("strictToolArgs", cfg.strictToolArgs);
 
 			// Migrate forward: if the file predates any key (e.g. an install from before
 			// the record hotkeys existed), rewrite it so the new keys appear with their
@@ -149,7 +151,7 @@ namespace dvb
 				"recordIntervalMs", "autoRunPath", "autoRunRestoreScene", "loadSettleMs",
 				"couplingAnchorMs", "couplingCellMs", "cleanTransition", "cleanTransitionCell",
 				"captureDir", "captureScanDirs", "captureTimeoutMs", "captureSettleMs",
-				"stallWatchdogMs", "allowMemoryWrites"
+				"stallWatchdogMs", "allowMemoryWrites", "strictToolArgs"
 			};
 			const bool complete = std::all_of(std::begin(kKeys), std::end(kKeys),
 				[&](const char* k) { return j.contains(k); });

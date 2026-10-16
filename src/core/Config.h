@@ -75,6 +75,10 @@ namespace dvb
 		// bench; writing it is a different risk class (a typo'd address pokes the live
 		// engine), so it is opt-in per install AND needs confirm=true per request.
 		bool allowMemoryWrites = false;
+
+		// Fail a tool request carrying a top-level key its inputSchema doesn't declare (400) instead
+		// of only warning in the reply. Off by default: a tool with an incomplete schema would break.
+		bool strictToolArgs = false;
 	};
 
 	// The port used when config.json does not pin one. Deterministic per runtime so a

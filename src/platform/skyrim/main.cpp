@@ -1,6 +1,8 @@
 #include "Autorun.h"
+#include "CameraOrbit.h"
 #include "Capture.h"
 #include "ConsoleHook.h"
+#include "ConsoleLogCapture.h"
 #include "FreeCamera.h"
 #include "GameEvents.h"
 #include "InputHotkeys.h"
@@ -76,6 +78,8 @@ namespace
 	{
 		if (!a_msg)
 			return;
+		if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame || a_msg->type == SKSE::MessagingInterface::kNewGame)
+			dvb::CameraOrbit::EndSession();  // an orbit never carries into another game
 		if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame)
 			dvb::FreeCamera::BeginLoad();
 		else if (a_msg->type == SKSE::MessagingInterface::kNewGame || a_msg->type == SKSE::MessagingInterface::kPostLoadGame)
@@ -99,6 +103,7 @@ namespace
 				g_server->Events().SetFrameProvider(&dvb::game::CurrentFrame);
 				dvb::tools::RegisterCommonTools(g_server->Tools(), g_server->Events());
 				dvb::tools::SetAllowMemoryWrites(cfg.allowMemoryWrites);
+				g_server->Tools().SetStrictArgs(cfg.strictToolArgs);
 				dvb::RegisterCoreTools(g_server->Tools(), g_server->Events());
 				dvb::Recording::SetLoadSettleMs(cfg.loadSettleMs);
 				dvb::Recording::SetDefaultIntervalMs(cfg.recordIntervalMs);
@@ -116,10 +121,33 @@ namespace
 																									 },
 																									 .get = &dvb::TimeScaleControl::Effective,
 																								 });
-				g_server->Start();
+				// Never let a throw here escape into SKSE's kPostLoad dispatch: that aborts the
+				// remaining listeners, silently leaving every later-loaded plugin without its
+				// kPostLoad (observed as other mods' API-dependent features vanishing, with the
+				// fault showing up only in an unrelated mod's log). A dev tool failing to start
+				// must not take the rest of the load order down with it.
+				try {
+					g_server->Start();
+				} catch (const std::exception& e) {
+					logs::error("devbench: server failed to start: {}", e.what());
+					try {
+						g_server->Stop();
+					} catch (...) {
+						logs::error("devbench: Stop() also failed");
+					}
+				} catch (...) {
+					logs::error("devbench: server failed to start (unknown exception)");
+					try {
+						g_server->Stop();
+					} catch (...) {
+						logs::error("devbench: Stop() also failed");
+					}
+				}
 				dvb::InstallGameEvents(g_server->Events());
 				dvb::StallWatchdog::Start(g_server->Events(), cfg.stallWatchdogMs);
 				dvb::ConsoleHook::Install(g_server->Events());  // observe console commands as events / for recording
+				dvb::CameraOrbit::Install();                    // camera action='orbit' holds the gameplay camera round the player
+				dvb::ConsoleLogCapture::InstallPrintHook();     // every printed line reaches a console capture
 
 				// Receive cross-plugin interface requests from ANY plugin (nullptr sender),
 				// so consumer mods' dispatches reach us (mirrors MergeMapper). Registered

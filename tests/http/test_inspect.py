@@ -73,6 +73,52 @@ def test_refs_player_by_formid(client, inspect):
     assert isinstance(actor, dict), ref
     assert _is_number(actor.get("health")), actor
     assert _is_number(actor.get("level")), actor
+    rotation = ref.get("rotation")
+    assert isinstance(rotation, list) and len(rotation) == 3, ref
+    assert all(_is_number(v) for v in rotation), ref
+
+
+@pytest.mark.requires_player
+def test_refs_actor_reports_attack_state_and_stamina(client, inspect):
+    require_enum(inspect, "kind", "refs")
+    body = client.ok("inspect", {"kind": "refs", "formId": "0x14"})
+    actor = body["refs"][0].get("actor")
+    state = actor.get("attackState")  # a reused game's player may be mid-attack: any state, not only 0
+    assert isinstance(state, int) and not isinstance(state, bool) and state >= 0, actor
+    assert _is_number(actor.get("stamina")) and _is_number(actor.get("staminaMax")), actor
+
+
+@pytest.mark.requires_player
+def test_refs_enumerate_reports_cell_and_model(client, inspect):
+    require_enum(inspect, "kind", "refs")
+    body = client.ok("inspect", {"kind": "refs", "formType": "Static", "radius": 5000, "limit": 50})
+    refs = body.get("refs")
+    assert isinstance(refs, list), body
+    for ref in refs:
+        if "model" in ref:
+            assert isinstance(ref["model"], str) and ref["model"], ref
+        if "cell" in ref:
+            assert isinstance(ref["cell"], dict) and "formId" in ref["cell"], ref
+        if "bounds" in ref:
+            bounds = ref["bounds"]
+            assert isinstance(bounds, dict) and "min" in bounds and "max" in bounds, ref
+            assert len(bounds["min"]) == 3 and len(bounds["max"]) == 3, ref
+
+
+@pytest.mark.requires_player
+def test_refs_model_filter(client, inspect):
+    require_enum(inspect, "kind", "refs")
+    unfiltered = client.ok("inspect", {"kind": "refs", "formType": "Static", "radius": 5000, "limit": 50})
+    with_model = next((r for r in unfiltered.get("refs", []) if r.get("model")), None)
+    if with_model is None:
+        pytest.skip("no static ref with a mesh path in range to filter on")
+    needle = with_model["model"].split("\\")[-1].split(".")[0][:6].lower()
+    body = client.ok("inspect", {"kind": "refs", "formType": "Static", "model": needle, "radius": 5000, "limit": 50})
+    refs = body.get("refs")
+    assert isinstance(refs, list) and refs, body
+    assert any(ref.get("formId") == with_model["formId"] for ref in refs), body
+    for ref in refs:
+        assert needle in ref.get("model", "").lower(), ref
 
 
 @pytest.mark.requires_player
@@ -92,6 +138,8 @@ def test_refs_actors_in_radius(client, inspect):
         btype = (ref.get("base", {}) or {}).get("formType", "")
         if "ACHR" in ftype or "ACHR" in btype or "NPC_" in btype:
             assert isinstance(ref.get("actor"), dict), ref
+            assert isinstance(ref["actor"].get("alive"), bool), ref
+            assert isinstance(ref["actor"].get("loaded3D"), bool), ref
 
     assert any((r.get("base", {}) or {}).get("name") for r in refs), \
         "expected at least one actor ref with a base.name"

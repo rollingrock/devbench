@@ -16,11 +16,13 @@ if (!baseRef) {
   throw new Error("usage: check-tools-fallback-sync.mjs <base-ref>");
 }
 
+// A core-tool file counts only when a changed code line (comments excluded) holds a string
+// literal of three or more characters: tool text and schema keys are always literals.
+//
 // Registration files that feed every family's list: tools registered from the
 // shared core (ping, memory, log, ...) appear in each game's fallback.
 const SHARED_FILES = [
   "src/core/HostApi.cpp",
-  "src/core/ToolRegistry.h",
   "src/core/tools/CommonTools.cpp",
   "src/core/tools/GfxTools.cpp",
 ];
@@ -37,6 +39,13 @@ const FALLBACKS = {
     ...SHARED_FILES,
   ],
 };
+// Not every edit to this header changes what tools advertise: only its descriptor
+// shape and default schema reach tools/list, so it counts only when a changed code
+// line (comments excluded) mentions one of those. It is core, so it feeds every family.
+const DESCRIPTOR_FILE = "src/core/ToolRegistry.h";
+const DESCRIPTOR_TOKENS =
+  /\b(DefaultInputSchema|ToolDescriptor|inputSchema|readOnly)\b/;
+const STRING_LITERAL = /"(?:[^"\\]|\\.){3,}"/;
 
 // Structural validation, independent of whether a registration file changed --
 // the file-touched check below only proves the file moved, not that it's sane.
@@ -81,9 +90,32 @@ const changed = execFileSync(
   .split("\n")
   .filter(Boolean);
 
+function changedCodeLines(file) {
+  if (!changed.includes(file)) return [];
+  const diff = execFileSync(
+    "git",
+    ["diff", "-U0", `${baseRef}...HEAD`, "--", file],
+    { encoding: "utf-8" },
+  );
+  return diff
+    .split("\n")
+    .filter((l) => /^[+-](?![+-])/.test(l))
+    .map((l) => l.slice(1).trim())
+    .filter((l) => l && !l.startsWith("//") && !l.startsWith("/*"));
+}
+
+const descriptorChanged = changedCodeLines(DESCRIPTOR_FILE).some((l) =>
+  DESCRIPTOR_TOKENS.test(l),
+);
+
 let failed = false;
 for (const [FALLBACK_FILE, sources] of Object.entries(FALLBACKS)) {
-  const touched = sources.filter((f) => changed.includes(f));
+  const touched = [
+    ...sources.filter((f) =>
+      changedCodeLines(f).some((l) => STRING_LITERAL.test(l)),
+    ),
+    ...(descriptorChanged ? [DESCRIPTOR_FILE] : []),
+  ];
   if (touched.length && !changed.includes(FALLBACK_FILE)) {
     console.error(
       `A devbench core-tool file changed (${touched.join(", ")}) without ${FALLBACK_FILE}. ` +

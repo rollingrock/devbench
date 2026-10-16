@@ -1,4 +1,6 @@
 #include "Tools.h"
+#include "CameraOrbit.h"
+#include <RE/T/ThirdPersonState.h>
 
 #include "Capture.h"
 #include "ConsoleLogCapture.h"
@@ -10,9 +12,12 @@
 #include "ReplayDriver.h"
 #include "TimeScaleControl.h"
 #include "Version.h"
+#include "core/CameraFrameLogic.h"
 #include "core/EventBus.h"
 #include "core/GameState.h"
+#include "core/HeldLightsLogic.h"
 #include "core/HostApi.h"
+#include "core/InspectLogic.h"
 #include "core/Json.h"
 #include "core/MainThread.h"
 #include "core/ReplayTrajectory.h"
@@ -31,9 +36,30 @@
 #include <map>
 #include <optional>
 #include <thread>
+#include <unordered_set>
 
 namespace dvb
 {
+	namespace
+	{
+		// Main thread. What the orbit was asked for and whether it has applied yet (it applies on the next
+		// third-person camera update).
+		json OrbitJson()
+		{
+			const auto&     s = CameraOrbit::State();
+			const auto&     r = s.Requested();
+			constexpr float kRad = 180.0f / 3.14159265f;
+			json            requested = nullptr;
+			if (s.On())
+				requested = json{ { "yawDeg", r.yawRad * kRad },
+					{ "pitchDeg", r.pitchRad ? json(*r.pitchRad * kRad) : json(nullptr) },
+					{ "zoom", r.zoom ? json(*r.zoom) : json(nullptr) },
+					{ "right", r.offset ? json(r.offset->x) : json(nullptr) },
+					{ "up", r.offset ? json(r.offset->z) : json(nullptr) } };
+			return json{ { "on", s.On() }, { "applied", s.Applied() }, { "requested", requested },
+				{ "lastEnd", CameraOrbit::EndReasonName(s.LastEnd()) }, { "session", s.Session() }, { "revision", s.Revision() } };
+		}
+	}
 	namespace
 	{
 		bool Truthy(const json& a_v)
@@ -102,10 +128,19 @@ namespace dvb
 		json ConsoleHandler(const json& a_args, const ToolContext& a_ctx)
 		{
 			const std::string action = a_args.value("action", std::string("exec"));
+			const bool        capture = a_args.contains("capture") && Truthy(a_args["capture"]);
+			std::int64_t      maxLines = 200;
+			if (action == "read" || capture) {
+				try {
+					maxLines = ParseBoundedIntegerArgument(a_args, "maxLines", 200, 1, static_cast<std::int64_t>(ConsoleLogCapture::PrintCollector::kMaxLines));
+				} catch (const std::invalid_argument&) {
+					throw ToolError(400, std::format("console: 'maxLines' must be an integer 1..{}", ConsoleLogCapture::PrintCollector::kMaxLines));
+				}
+			}
 
 			if (action == "read") {
-				return MainThread::RunAndWait([]() -> json {
-					const auto r = ConsoleLogCapture::ReadFenced(200);
+				return MainThread::RunAndWait([maxLines]() -> json {
+					const auto r = ConsoleLogCapture::ReadFenced(static_cast<std::size_t>(maxLines));
 					json       arr = json::array();
 					for (const auto& l : r.lines)
 						arr.push_back(l);
@@ -127,6 +162,10 @@ namespace dvb
 									  { "consoleMenuExists", r.consoleMenuExists },
 									  { "consoleMenuOpen", r.consoleMenuOpen },
 									  { "consoleMode", r.consoleMode },
+									  { "printHooked", r.printHooked },
+									  { "printLines", r.printLines },
+									  { "printBytes", r.printBytes },
+									  { "printDropped", r.printDropped },
 									  { "ringLines", r.ringLines },
 									  { "samples", r.samples },
 									  { "ticks", r.ticks },
@@ -165,14 +204,20 @@ namespace dvb
 			if (!task)
 				throw ToolError(500, "SKSE TaskInterface unavailable");
 
-			const bool capture = a_args.contains("capture") && Truthy(a_args["capture"]);
-
 			if (!capture) {
 				task->AddTask([command]() { RE::Console::ExecuteCommand(command.c_str()); });
 				return json{ { "queued", true }, { "command", command }, { "capturing", false } };
 			}
-			const bool completed = ConsoleLogCapture::RunFencedCapture(command);
-			return json{ { "queued", false }, { "command", command }, { "capturing", true }, { "completed", completed } };
+			// The output comes back with the exec, saving the 'read' round trip; it is this capture's
+			// own, copied before another capture could start. No snapshot (source "none") = no lines.
+			ConsoleLogCapture::Result r;
+			const bool                completed = ConsoleLogCapture::RunFencedCapture(command, &r, static_cast<std::size_t>(maxLines));
+			json                      out{ { "queued", false }, { "command", command }, { "capturing", true }, { "completed", completed } };
+			if (r.source != "none") {
+				out["lines"] = r.lines;
+				out["lossPossible"] = r.lossPossible;
+			}
+			return out;
 		}
 
 		namespace fs = std::filesystem;
@@ -234,6 +279,7 @@ namespace dvb
 		// game setTimeScale: how long to wait for the engine to actually reach the requested speed
 		// (the reconciler applies it on the next main-thread frame, and the engine then ramps).
 		constexpr int kScaleApplyTimeoutMs = 2000;
+		constexpr int kScaleMaxWaitMs = 30000;
 		constexpr int kScalePollMs = 5;
 
 		// A Pascal-style string in the .ess header: uint16 length + that many raw (non-UTF16,
@@ -491,21 +537,44 @@ namespace dvb
 						throw ToolError(400, std::format("game setTimeScale: 'holdMs' must be 1..{}", TimeScaleControl::kMaximumLeaseMs));
 				}
 
+				int waitMs = kScaleApplyTimeoutMs;
+				if (const auto waitArg = a_args.find("waitMs"); waitArg != a_args.end()) {
+					if (!waitArg->is_number_integer() || waitArg->get<std::int64_t>() < 0 || waitArg->get<std::int64_t>() > kScaleMaxWaitMs)
+						throw ToolError(400, std::format("game setTimeScale: 'waitMs' must be an integer 0..{}", kScaleMaxWaitMs));
+					waitMs = waitArg->get<int>();
+				}
+
+				const bool requireReached = BooleanArgument(a_args, "requireReached", false);
+
+				const auto                        admitStart = std::chrono::steady_clock::now();
 				const TimeScaleControl::SetResult set = TimeScaleControl::Set(validation.value, holdMs,
 					LeaseOwner(a_ctx), BooleanArgument(a_args, "allowTimeScale", false));
+				const auto                        admitted = std::chrono::steady_clock::now();
 				if (!set.ok)
 					throw ToolError(409, std::format("game setTimeScale: {}", set.error));
 
-				// The reconciler applies this on the next engine frame and the engine then ramps
-				// toward it, so report only once it is actually running at the requested speed.
-				const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kScaleApplyTimeoutMs);
-				while (std::fabs(TimeScaleControl::Effective() - validation.value) > TimeScaleControl::kEffectiveTolerance) {
-					if (std::chrono::steady_clock::now() >= deadline)
-						throw ToolError(504, std::format("game setTimeScale: the engine is still at {} after {}ms (requested {})", TimeScaleControl::Effective(), kScaleApplyTimeoutMs, validation.value));
+				// Admission (which samples the engine on the main thread) is reported apart from
+				// convergence; waitMs bounds only the wait for this request to settle.
+				const auto deadline = admitted + std::chrono::milliseconds(waitMs);
+				while (!TimeScaleControl::IsTerminal(TimeScaleControl::StateOf(set.generation)) &&
+					   std::chrono::steady_clock::now() < deadline)
 					std::this_thread::sleep_for(std::chrono::milliseconds(kScalePollMs));
+				const auto waited = std::chrono::steady_clock::now();
+
+				json       out = TimeScaleControl::RequestStatus(set.generation);
+				const auto state = out.value("state", std::string{});
+				const bool reached = state == "reached";
+				out["reached"] = reached;
+				out["applied"] = reached || state == "written";
+				out["admissionMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(admitted - admitStart).count();
+				out["waitedMs"] = std::chrono::duration_cast<std::chrono::milliseconds>(waited - admitted).count();
+				if (!reached) {
+					const std::string note = std::format("request {} is '{}' after {}ms: the engine is at {} (requested {})", set.generation, state,
+						waitMs, out.value("effective", 0.0), validation.value);
+					if (requireReached)
+						throw ToolError(504, std::format("game setTimeScale: {}", note));
+					out["note"] = note + (state == "written" ? "; the engine ramps toward a new scale, poll getTimeScale or pass a longer waitMs" : "");
 				}
-				json out = TimeScaleControl::Status();
-				out["applied"] = true;
 				return out;
 			}
 
@@ -797,31 +866,406 @@ namespace dvb
 			return j;
 		}
 
+		// Resolve a form argument: an explicit 0x.. FormID, else an EditorID (tried first so an all-hex
+		// EditorID isn't misread as a FormID), else a bare hex FormID. The hex must be the whole string
+		// and fit 32 bits, so "14G" or an overflow can't truncate to a valid FormID and resolve the
+		// wrong form. Shared by 'inspect refs' formId and 'camera frame'.
+		RE::TESForm* LookupFormArg(const std::string& a_arg)
+		{
+			auto byHex = [](const std::string& s) -> RE::TESForm* {
+				std::size_t        consumed = 0;
+				unsigned long long id = 0;
+				try {
+					id = std::stoull(s, &consumed, 16);
+				} catch (...) {
+					return nullptr;
+				}
+				if (consumed != s.size() || id > 0xFFFFFFFFull)
+					return nullptr;
+				return RE::TESForm::LookupByID(static_cast<RE::FormID>(id));
+			};
+			if (a_arg.size() > 2 && a_arg[0] == '0' && (a_arg[1] == 'x' || a_arg[1] == 'X'))
+				return byHex(a_arg.substr(2));
+			if (auto* f = RE::TESForm::LookupByEditorID(a_arg))
+				return f;
+			return byHex(a_arg);
+		}
+
 		// Identify a placed reference — the form's identity plus its base object and position.
-		// Actors get a live combat snapshot (health, level, hostility) so 'refs formType=Actor'
+		// Actors get a live combat snapshot (health, stamina, attack state, level, hostility) so 'refs formType=Actor'
 		// is an actual check on the NPCs in the scene, not just their names.
 		json IdentifyRef(RE::TESObjectREFR* a_ref)
 		{
 			if (!a_ref)
 				return nullptr;
 			json j = IdentifyForm(a_ref);
-			if (auto* base = a_ref->GetBaseObject())
+			if (!j.contains("name")) {
+				if (auto* actor = a_ref->As<RE::Actor>())
+					if (const char* n = actor->GetDisplayFullName(); n && *n)
+						j["name"] = n;
+			}
+			if (auto* base = a_ref->GetBaseObject()) {
 				j["base"] = IdentifyForm(base);
+				if (auto* model = base->As<RE::TESModel>(); model && model->GetModel() && *model->GetModel())
+					j["model"] = model->GetModel();
+			}
 			const auto p = a_ref->GetPosition();
 			j["position"] = json::array({ p.x, p.y, p.z });
+			const auto r = a_ref->GetAngle();
+			j["rotation"] = json::array({ r.x, r.y, r.z });
+			if (auto* cell = a_ref->GetParentCell())
+				j["cell"] = IdentifyForm(cell);
+			const auto bMin = a_ref->GetBoundMin();
+			const auto bMax = a_ref->GetBoundMax();
+			if (bMin != RE::NiPoint3{} || bMax != RE::NiPoint3{}) {
+				j["bounds"] = json{
+					{ "min", json::array({ bMin.x, bMin.y, bMin.z }) },
+					{ "max", json::array({ bMax.x, bMax.y, bMax.z }) },
+				};
+			}
 
 			if (auto* actor = a_ref->As<RE::Actor>()) {
-				json a{ { "level", actor->GetLevel() } };
+				json a{ { "level", actor->GetLevel() }, { "alive", !actor->IsDead() }, { "loaded3D", actor->Is3DLoaded() } };
 				if (auto* avo = actor->AsActorValueOwner()) {
 					a["health"] = avo->GetActorValue(RE::ActorValue::kHealth);
 					a["healthMax"] = avo->GetPermanentActorValue(RE::ActorValue::kHealth);
+					a["stamina"] = avo->GetActorValue(RE::ActorValue::kStamina);
+					a["staminaMax"] = avo->GetPermanentActorValue(RE::ActorValue::kStamina);
 				}
+				// The console's GetAttackState: 0 none, 1 draw, 2 swing, 3 hit, 4 next attack, 5 follow-through, 6 bash, 8-13 bow.
+				if (auto* state = actor->AsActorState())
+					a["attackState"] = static_cast<int>(state->GetAttackState());
 				if (auto* pc = RE::PlayerCharacter::GetSingleton(); pc && actor != pc)
 					a["hostileToPlayer"] = actor->IsHostileToActor(pc);
 				a["playerTeammate"] = actor->IsPlayerTeammate();
 				j["actor"] = std::move(a);
 			}
 			return j;
+		}
+
+		// ---- lights: which NiLights hang under a reference's 3D, and whether the renderer uses them ----
+
+		// One read's limits: graph nodes visited, parent links walked (paths and owners), lights emitted.
+		constexpr std::size_t kLightNodeBudget = 50000;
+		constexpr std::size_t kLightParentStepBudget = 100000;
+		constexpr std::size_t kLightPathDepth = 64;
+		constexpr std::size_t kLightOwnerDepth = 256;
+
+		constexpr const char* kLightObservation =
+			"inScene reads the world ShadowSceneNode's activeLights / activeShadowLights at the moment of this read: "
+			"'active' or 'shadow' means the renderer is lighting with that NiLight this frame, not that it visibly "
+			"lights anything; false means it is in neither list";
+
+		// NiLight -> "active" / "shadow" for every light the world ShadowSceneNode is lighting with.
+		using ActiveLightIndex = std::unordered_map<const RE::NiLight*, const char*>;
+
+		ActiveLightIndex IndexActiveLights()
+		{
+			ActiveLightIndex index;
+			auto*            ssn = RE::BSShaderManager::State::GetSingleton().shadowSceneNode[0];
+			if (!ssn)
+				return index;
+			auto& data = ssn->GetRuntimeData();
+			for (const auto& bl : data.activeLights)
+				if (bl && bl->light)
+					index.emplace(bl->light.get(), "active");
+			for (const auto& bl : data.activeShadowLights)
+				if (bl && bl->light)
+					index[bl->light.get()] = "shadow";
+			return index;
+		}
+
+		// "NPC Root [Root] > ... > MagicRight" from a_root (or the top of the graph) down to the
+		// light's parent node; at most kLightPathDepth names, each step charged to a_budget. A path
+		// cut short starts with "... ".
+		std::string NodePath(const RE::NiAVObject* a_object, const RE::NiAVObject* a_root, InspectLogic::TraversalBudget& a_budget)
+		{
+			std::vector<std::string> names;
+			bool                     cut = false;
+			for (const RE::NiAVObject* n = a_object->parent; n; n = n->parent) {
+				if (names.size() >= kLightPathDepth || !a_budget.StepParent()) {
+					cut = true;
+					break;
+				}
+				names.emplace_back(n->name.c_str() ? n->name.c_str() : "");
+				if (n == a_root)
+					break;
+			}
+			std::string path;
+			for (auto it = names.rbegin(); it != names.rend(); ++it)
+				path += (path.empty() ? "" : " > ") + (it->empty() ? std::string("(unnamed)") : *it);
+			return cut ? "... " + path : path;
+		}
+
+		// The reference whose 3D this object hangs under, from the nearest ancestor that carries one;
+		// nullptr when none is found within kLightOwnerDepth steps or the budget.
+		RE::TESObjectREFR* OwnerOf(const RE::NiAVObject* a_object, InspectLogic::TraversalBudget& a_budget)
+		{
+			std::size_t depth = 0;
+			for (const RE::NiAVObject* n = a_object; n; n = n->parent) {
+				if (depth++ >= kLightOwnerDepth || !a_budget.StepParent())
+					return nullptr;
+				if (auto* ref = n->GetUserData())
+					return ref;
+			}
+			return nullptr;
+		}
+
+		json DescribeLight(const RE::NiLight* a_light, const RE::NiAVObject* a_root, const ActiveLightIndex& a_active, InspectLogic::TraversalBudget& a_budget)
+		{
+			const auto& data = a_light->GetLightRuntimeData();
+			const auto  pos = a_light->world.translate;
+			const auto  scene = a_active.find(a_light);
+			json        j{
+				{ "name", a_light->name.c_str() ? a_light->name.c_str() : "" },
+				{ "type", a_light->GetRTTI() && a_light->GetRTTI()->GetName() ? a_light->GetRTTI()->GetName() : "" },
+				{ "path", NodePath(a_light, a_root, a_budget) },
+				{ "diffuse", json::array({ data.diffuse.red, data.diffuse.green, data.diffuse.blue }) },
+				{ "radius", data.radius.x },
+				{ "fade", data.fade },
+				{ "fadeAmount", a_light->fadeAmount },
+				{ "appCulled", a_light->GetAppCulled() },
+				{ "inScene", scene != a_active.end() ? json(scene->second) : json(false) },
+				{ "position", json::array({ pos.x, pos.y, pos.z }) },
+			};
+			return j;
+		}
+
+		// A node reached twice (a shared child) is read once; every node is charged to a_budget.
+		json LightsUnder(const RE::NiAVObject* a_root, const ActiveLightIndex& a_active, InspectLogic::TraversalBudget& a_budget,
+			std::unordered_set<const RE::NiAVObject*>& a_visited)
+		{
+			json                               out = json::array();
+			std::vector<const RE::NiAVObject*> stack;
+			if (a_root)
+				stack.push_back(a_root);
+			while (!stack.empty()) {
+				const RE::NiAVObject* object = stack.back();
+				stack.pop_back();
+				if (!object || !a_visited.insert(object).second)
+					continue;
+				if (!a_budget.VisitNode())
+					break;
+				if (const auto* light = netimmerse_cast<const RE::NiLight*>(object)) {
+					if (!a_budget.Emit())
+						break;
+					out.push_back(DescribeLight(light, a_root, a_active, a_budget));
+				}
+				if (auto* node = const_cast<RE::NiAVObject*>(object)->AsNode()) {
+					auto& children = node->GetChildren();
+					for (auto i = children.size(); i > 0; --i)
+						if (const auto& child = children[i - 1])
+							stack.push_back(child.get());
+				}
+			}
+			return out;
+		}
+
+		// Every NiLight under a_root, each node charged to a_budget.
+		void CollectLightObjects(const RE::NiAVObject* a_root, std::vector<const RE::NiLight*>& a_out, InspectLogic::TraversalBudget& a_budget)
+		{
+			std::vector<const RE::NiAVObject*> stack;
+			if (a_root)
+				stack.push_back(a_root);
+			while (!stack.empty()) {
+				const RE::NiAVObject* object = stack.back();
+				stack.pop_back();
+				if (!object)
+					continue;
+				if (!a_budget.VisitNode())
+					return;
+				if (const auto* light = netimmerse_cast<const RE::NiLight*>(object))
+					a_out.push_back(light);
+				if (auto* node = const_cast<RE::NiAVObject*>(object)->AsNode()) {
+					auto& children = node->GetChildren();
+					for (auto i = children.size(); i > 0; --i)
+						if (const auto& child = children[i - 1])
+							stack.push_back(child.get());
+				}
+			}
+		}
+
+		json LightsCoverage(const InspectLogic::TraversalBudget& a_budget)
+		{
+			json by = json::array();
+			for (const auto& b : a_budget.TruncatedBy())
+				by.push_back(b);
+			return json{
+				{ "truncated", a_budget.Truncated() },
+				{ "truncatedBy", std::move(by) },
+				{ "nodesVisited", a_budget.Nodes() },
+				{ "nodeBudget", a_budget.MaxNodes() },
+				{ "parentSteps", a_budget.ParentSteps() },
+				{ "parentStepBudget", a_budget.MaxParentSteps() },
+				{ "lightsEmitted", a_budget.Output() },
+				{ "outputBudget", a_budget.MaxOutput() },
+			};
+		}
+
+		// ---- hands: one main-thread snapshot of what each hand holds and what its caster shows ----
+
+		const char* WeaponStateName(RE::WEAPON_STATE a_state)
+		{
+			switch (a_state) {
+			case RE::WEAPON_STATE::kSheathed:
+				return "sheathed";
+			case RE::WEAPON_STATE::kWantToDraw:
+				return "wantToDraw";
+			case RE::WEAPON_STATE::kDrawing:
+				return "drawing";
+			case RE::WEAPON_STATE::kDrawn:
+				return "drawn";
+			case RE::WEAPON_STATE::kWantToSheathe:
+				return "wantToSheathe";
+			case RE::WEAPON_STATE::kSheathing:
+				return "sheathing";
+			default:
+				return "unknown";
+			}
+		}
+
+		const char* CasterStateName(RE::MagicCaster::State a_state)
+		{
+			switch (a_state) {
+			case RE::MagicCaster::State::kNone:
+				return "none";
+			case RE::MagicCaster::State::kReady:
+				return "ready";
+			case RE::MagicCaster::State::kCharging:
+				return "charging";
+			case RE::MagicCaster::State::kCasting:
+				return "casting";
+			default:
+				return "other";
+			}
+		}
+
+		RE::ActorMagicCaster* HandCaster(RE::Actor* a_actor, bool a_left)
+		{
+			return a_actor->GetActorRuntimeData().magicCasters[a_left ? RE::Actor::SlotTypes::kLeftHand : RE::Actor::SlotTypes::kRightHand];
+		}
+
+		// Whether a_art is the casting art of one of the spell's effects.
+		bool SpellUsesArt(const RE::SpellItem* a_spell, const RE::BGSArtObject* a_art)
+		{
+			for (const auto* effect : a_spell->effects)
+				if (effect && effect->baseEffect && effect->baseEffect->data.castingArt == a_art)
+					return true;
+			return false;
+		}
+
+		json DescribeHand(RE::Actor* a_actor, bool a_left, InspectLogic::HandObservation& a_obs, const ActiveLightIndex* a_active,
+			InspectLogic::TraversalBudget* a_budget)
+		{
+			auto* equipped = a_actor->GetEquippedObject(a_left);
+			auto* spell = equipped ? equipped->As<RE::SpellItem>() : nullptr;
+			a_obs.holdsSpell = spell != nullptr;
+			json j{ { "equipped", IdentifyForm(equipped) } };
+			if (a_active && a_budget) {
+				// Lights hung on what the hand holds (a weapon or staff light, an enchantment light), from both 3D trees.
+				// Each entry says which scene list it is in; that is not proof it is visible.
+				const char*                     nodeName = a_left ? "SHIELD" : "WEAPON";
+				json                            held = json::array();
+				std::vector<HeldLights::Search> searches;
+				std::vector<HeldLights::Entry>  entries;
+				auto*                           thirdRoot = a_actor->Get3D(false);
+				for (const bool firstPerson : { false, true }) {
+					auto* root = firstPerson ? a_actor->Get3D(true) : thirdRoot;
+					// Only the player has a separate first-person tree; an NPC's Get3D(true) returns its third-person
+					// root, which would list each of its lights twice.
+					if (firstPerson && (!root || root == thirdRoot))
+						continue;
+					HeldLights::Search search{ firstPerson ? "firstPerson" : "thirdPerson", nodeName };
+					search.rootLoaded = root != nullptr;
+					auto* node = root ? root->GetObjectByName(nodeName) : nullptr;
+					search.nodeFound = node != nullptr;
+					searches.push_back(search);
+					if (!node)
+						continue;
+					std::vector<const RE::NiLight*> lights;
+					CollectLightObjects(node, lights, *a_budget);
+					for (const auto* light : lights) {
+						if (!a_budget->Emit())
+							break;  // the read's output limit covers held lights too; a refusal leaves the search incomplete
+						const auto scene = a_active->find(light);
+						entries.push_back({ reinterpret_cast<std::uintptr_t>(light), HeldLights::MembershipOf(scene == a_active->end() ? nullptr : scene->second) });
+						json entry = DescribeLight(light, node, *a_active, *a_budget);
+						entry["view"] = search.view;
+						entry["lightId"] = std::format("{:X}", reinterpret_cast<std::uintptr_t>(light));
+						held.push_back(std::move(entry));
+					}
+				}
+				j["heldLights"] = std::move(held);
+				j.update(HeldLights::SummaryFields(searches, HeldLights::Summarize(searches, entries), a_budget->Truncated()));
+			}
+			auto* caster = HandCaster(a_actor, a_left);
+			a_obs.casterPresent = caster != nullptr;
+			if (!caster) {
+				j["caster"] = nullptr;
+				return j;
+			}
+			// The engine's attach sequence: an equip clears the attached flag and names the art to attach
+			// (castingArt), a clone task loads it, then the clone is recorded and the flag set again.
+			const RE::NiNode* attached = caster->castingArtData.attachedArt.get();
+			a_obs.artAttached = caster->flags.any(RE::ActorMagicCaster::Flags::kCastingArtAttached);
+			a_obs.artLoading = caster->cloneTask.get() != nullptr;
+			a_obs.artPending = caster->castingArt != nullptr;
+			a_obs.artNodePresent = attached != nullptr;
+			if (spell && caster->castingArt)
+				a_obs.pendingMatchesEquipped = SpellUsesArt(spell, caster->castingArt);
+			json c{
+				{ "state", CasterStateName(caster->state.get()) },
+				{ "stateValue", caster->state.underlying() },
+				{ "currentSpell", IdentifyForm(caster->currentSpell) },
+				{ "castingArt", IdentifyForm(caster->castingArt) },
+				{ "castingArtPending", a_obs.artPending },
+				{ "pendingArtMatchesEquipped", a_obs.pendingMatchesEquipped ? json(*a_obs.pendingMatchesEquipped) : json(nullptr) },
+				{ "castingArtLoading", a_obs.artLoading },
+				{ "castingArtAttached", a_obs.artAttached },
+				{ "attachedArtNode", attached && attached->name.c_str() ? json(attached->name.c_str()) : json(nullptr) },
+				{ "magicNode", caster->magicNode && caster->magicNode->name.c_str() ? json(caster->magicNode->name.c_str()) : json(nullptr) },
+			};
+			// The hand light the engine gives a readied spell (its magic effect's casting light).
+			if (a_active && a_budget && caster->light && caster->light->light)
+				c["light"] = DescribeLight(caster->light->light.get(), nullptr, *a_active, *a_budget);
+			else
+				c["light"] = nullptr;
+			j["caster"] = std::move(c);
+			return j;
+		}
+
+		struct HandsSnapshot
+		{
+			InspectLogic::HandsObservation observation;
+			json                           report;
+		};
+
+		// Main thread. The JSON and the waitUntil predicates are built from the same reads.
+		HandsSnapshot SnapshotHands(RE::Actor* a_actor, const ActiveLightIndex* a_active, InspectLogic::TraversalBudget* a_budget)
+		{
+			HandsSnapshot snap;
+			snap.report["left"] = DescribeHand(a_actor, true, snap.observation.left, a_active, a_budget);
+			snap.report["right"] = DescribeHand(a_actor, false, snap.observation.right, a_active, a_budget);
+			if (auto* state = a_actor->AsActorState()) {
+				const auto weaponState = state->GetWeaponState();
+				snap.observation.settledDrawn = weaponState == RE::WEAPON_STATE::kDrawn;
+				snap.report["weaponDrawn"] = state->IsWeaponDrawn();
+				snap.report["weaponState"] = WeaponStateName(weaponState);
+				snap.report["weaponSettledDrawn"] = snap.observation.settledDrawn;
+			} else {
+				snap.report["weaponDrawn"] = nullptr;
+				snap.report["weaponState"] = nullptr;
+				snap.report["weaponSettledDrawn"] = nullptr;
+			}
+			snap.report["castingArtReady"] = InspectLogic::ArtAttachedOrNoSpell(snap.observation.left) &&
+			                                 InspectLogic::ArtAttachedOrNoSpell(snap.observation.right);
+			snap.report["handsReady"] = InspectLogic::HandsReady(snap.observation);
+			return snap;
+		}
+
+		json DescribeHands(RE::Actor* a_actor, const ActiveLightIndex& a_active, InspectLogic::TraversalBudget& a_budget)
+		{
+			return SnapshotHands(a_actor, &a_active, &a_budget).report;
 		}
 
 		// Normalize a form-type filter to a substring needle. The engine's type strings are 4-char
@@ -1022,6 +1466,9 @@ namespace dvb
 						{ "left", IdentifyForm(pc->GetEquippedObject(true)) },
 						{ "ammo", IdentifyForm(pc->GetCurrentAmmo()) },
 					};
+					const auto                    active = IndexActiveLights();
+					InspectLogic::TraversalBudget budget(kLightNodeBudget, kLightParentStepBudget, kLightNodeBudget);
+					j["hands"] = DescribeHands(pc, active, budget);
 					return j;
 				});
 			}
@@ -1044,18 +1491,7 @@ namespace dvb
 					if (formId.empty()) {
 						owner = RE::PlayerCharacter::GetSingleton();
 					} else {
-						RE::TESForm* f = RE::TESForm::LookupByEditorID(formId);
-						if (!f) {
-							std::size_t        consumed = 0;
-							unsigned long long id = 0;
-							const std::string  hex = (formId.size() > 2 && formId[0] == '0' && (formId[1] == 'x' || formId[1] == 'X')) ? formId.substr(2) : formId;
-							try {
-								id = std::stoull(hex, &consumed, 16);
-							} catch (...) {
-							}
-							if (consumed == hex.size() && id <= 0xFFFFFFFFull)
-								f = RE::TESForm::LookupByID(static_cast<RE::FormID>(id));
-						}
+						RE::TESForm* f = LookupFormArg(formId);
 						owner = f ? f->As<RE::TESObjectREFR>() : nullptr;
 					}
 					if (!owner)
@@ -1177,18 +1613,7 @@ namespace dvb
 					if (formId.empty()) {
 						actor = RE::PlayerCharacter::GetSingleton();
 					} else {
-						RE::TESForm* f = RE::TESForm::LookupByEditorID(formId);
-						if (!f) {
-							std::size_t        consumed = 0;
-							unsigned long long id = 0;
-							const std::string  hex = (formId.size() > 2 && formId[0] == '0' && (formId[1] == 'x' || formId[1] == 'X')) ? formId.substr(2) : formId;
-							try {
-								id = std::stoull(hex, &consumed, 16);
-							} catch (...) {
-							}
-							if (consumed == hex.size() && id <= 0xFFFFFFFFull)
-								f = RE::TESForm::LookupByID(static_cast<RE::FormID>(id));
-						}
+						RE::TESForm* f = LookupFormArg(formId);
 						actor = f ? f->As<RE::Actor>() : nullptr;
 					}
 					if (!actor)
@@ -1240,10 +1665,120 @@ namespace dvb
 			//   'selected'    → the console-selected / crosshair ref (set via prid/click)
 			//   else enumerate the loaded references in the grid (on-screen or not), with optional
 			//                   'formType' filter, 'radius' (from player), and 'limit' (default 100).
+			// lights: every NiLight under a reference's 3D (default the player, both 3rd- and
+			// 1st-person), or scope='scene' for every light the renderer is using, nearest first.
+			if (kind == "lights") {
+				const std::string formId = a_args.value("formId", std::string{});
+				const bool        selected = a_args.value("selected", false);
+				const std::string scopeArg = a_args.value("scope", std::string{});
+				const auto        scope = InspectLogic::ParseLightsScope(scopeArg);
+				if (!scope)
+					throw ToolError(400, std::format("inspect lights: unknown scope '{}' (ref|scene)", scopeArg));
+				double radius = 0.0;
+				if (const auto it = a_args.find("radius"); it != a_args.end()) {
+					if (!it->is_number() || it->get<double>() < 0.0)
+						throw ToolError(400, "inspect lights: 'radius' must be a number >= 0");
+					radius = it->get<double>();
+				}
+				std::size_t limit = 100;
+				if (const auto it = a_args.find("limit"); it != a_args.end()) {
+					if (!it->is_number_integer() || it->get<std::int64_t>() < 0 || it->get<std::int64_t>() > static_cast<std::int64_t>(kLightNodeBudget))
+						throw ToolError(400, std::format("inspect lights: 'limit' must be an integer 0..{}", kLightNodeBudget));
+					limit = it->get<std::size_t>();
+				}
+				return MainThread::RunAndWait([=]() -> json {
+					const auto active = IndexActiveLights();
+					auto*      pc = RE::PlayerCharacter::GetSingleton();
+
+					if (*scope == InspectLogic::LightsScope::kScene) {
+						const bool havePosition = pc && pc->Get3D();
+						if (radius > 0.0 && !havePosition)
+							throw ToolError(409, "inspect lights: 'radius' needs the player's position, which is not available (no player 3D)");
+						const RE::NiPoint3 origin = havePosition ? pc->GetPosition() : RE::NiPoint3{};
+
+						// The scene list is already bounded by the renderer; the budget covers the
+						// parent walks for paths and owners.
+						InspectLogic::TraversalBudget         budget(kLightNodeBudget, kLightParentStepBudget, kLightNodeBudget);
+						std::vector<const RE::NiLight*>       lights;
+						std::vector<InspectLogic::SceneEntry> entries;
+						for (const auto& entry : active) {
+							const RE::NiLight*   light = entry.first;
+							std::optional<float> distance;
+							if (havePosition)
+								distance = origin.GetDistance(light->world.translate);
+							if (radius > 0.0 && *distance > radius)
+								continue;
+							const auto pos = light->world.translate;
+							entries.push_back({ distance, light->name.c_str() ? light->name.c_str() : "", {}, pos.x, pos.y, pos.z, lights.size() });
+							lights.push_back(light);
+						}
+						InspectLogic::OrderScene(entries);
+						json out = json::array();
+						for (const auto& e : entries) {
+							if (out.size() >= limit)
+								break;
+							if (!budget.Emit())
+								break;
+							const RE::NiLight* light = lights[e.index];
+							json               j = DescribeLight(light, nullptr, active, budget);
+							j["distance"] = e.distance ? json(*e.distance) : json(nullptr);
+							j["owner"] = IdentifyRef(OwnerOf(light, budget));
+							out.push_back(std::move(j));
+						}
+						const bool limited = entries.size() > out.size();
+						json       coverage = LightsCoverage(budget);
+						coverage["truncated"] = coverage["truncated"].get<bool>() || limited;
+						if (limited && !budget.Truncated())
+							coverage["truncatedBy"].push_back("limit");
+						return json{
+							{ "scope", "scene" },
+							{ "observation", kLightObservation },
+							{ "playerPosition", havePosition },
+							{ "count", entries.size() },
+							{ "returned", out.size() },
+							{ "truncated", coverage["truncated"] },
+							{ "coverage", std::move(coverage) },
+							{ "lights", std::move(out) },
+						};
+					}
+
+					RE::TESObjectREFR* ref = nullptr;
+					if (selected) {
+						ref = RE::Console::GetSelectedRef().get();
+					} else if (!formId.empty()) {
+						RE::TESForm* f = LookupFormArg(formId);
+						ref = f ? f->As<RE::TESObjectREFR>() : nullptr;
+					} else {
+						ref = pc;
+					}
+					if (!ref)
+						throw ToolError(404, "inspect lights: reference not found");
+
+					// One budget for the whole read. The visited set dedupes only the first- and third-person
+					// graphs and their shared children; the hand search re-walks WEAPON/SHIELD and charges those
+					// nodes again.
+					InspectLogic::TraversalBudget             budget(kLightNodeBudget, kLightParentStepBudget, limit);
+					std::unordered_set<const RE::NiAVObject*> visited;
+					json                                      out{ { "scope", "ref" }, { "ref", IdentifyRef(ref) }, { "observation", kLightObservation }, { "sceneActiveLights", active.size() } };
+					if (auto* actor = ref->As<RE::Actor>(); actor && actor == pc) {
+						out["thirdPerson"] = LightsUnder(pc->Get3D(false), active, budget, visited);
+						out["firstPerson"] = LightsUnder(pc->Get3D(true), active, budget, visited);
+					} else {
+						out["lights"] = LightsUnder(ref->Get3D(), active, budget, visited);
+					}
+					if (auto* actor = ref->As<RE::Actor>())
+						out["hands"] = DescribeHands(actor, active, budget);
+					out["coverage"] = LightsCoverage(budget);
+					out["truncated"] = budget.Truncated();
+					return out;
+				});
+			}
+
 			if (kind == "refs") {
 				const std::string formId = a_args.value("formId", std::string{});
 				const bool        selected = a_args.value("selected", false);
 				const std::string typeFilter = a_args.value("formType", std::string{});
+				const std::string modelFilter = a_args.value("model", std::string{});
 				const double      radius = a_args.value("radius", 0.0);
 				const int         limit = a_args.value("limit", 100);
 				if (radius < 0.0)
@@ -1257,28 +1792,8 @@ namespace dvb
 					};
 
 					if (!formId.empty()) {
-						// Explicit 0x.. → FormID; otherwise EditorID first (so an all-hex EditorID
-						// isn't misread as a FormID), then a bare hex FormID fallback.
-						// Whole-string + 32-bit-range hex, so "14G" / overflow don't truncate to a
-						// valid FormID and resolve the wrong form.
-						auto byHex = [](const std::string& s) -> RE::TESForm* {
-							std::size_t        consumed = 0;
-							unsigned long long id = 0;
-							try {
-								id = std::stoull(s, &consumed, 16);
-							} catch (...) {
-								return nullptr;
-							}
-							if (consumed != s.size() || id > 0xFFFFFFFFull)
-								return nullptr;
-							return RE::TESForm::LookupByID(static_cast<RE::FormID>(id));
-						};
-						RE::TESForm* f = nullptr;
-						if (formId.size() > 2 && formId[0] == '0' && (formId[1] == 'x' || formId[1] == 'X'))
-							f = byHex(formId.substr(2));
-						else if (f = RE::TESForm::LookupByEditorID(formId); !f)
-							f = byHex(formId);
-						json one = (f && f->As<RE::TESObjectREFR>()) ? IdentifyRef(f->As<RE::TESObjectREFR>()) : IdentifyForm(f);
+						RE::TESForm* f = LookupFormArg(formId);
+						json         one = (f && f->As<RE::TESObjectREFR>()) ? IdentifyRef(f->As<RE::TESObjectREFR>()) : IdentifyForm(f);
 						return json{ { "count", f ? 1 : 0 }, { "refs", f ? json::array({ one }) : json::array() } };
 					}
 
@@ -1297,6 +1812,7 @@ namespace dvb
 					// Friendly type names ('Actor', 'weapon') map onto the engine's 4-char codes;
 					// raw codes/prefixes still substring-match. Shared with 'inventory'.
 					std::string needle = FormTypeNeedle(typeFilter);
+					std::string modelNeedle = lower(modelFilter);
 					json        refs = json::array();
 					int         total = 0;
 					auto        cb = [&](RE::TESObjectREFR* r) {
@@ -1305,6 +1821,12 @@ namespace dvb
 								const std::string t = lower(std::string(RE::FormTypeToString(r->GetFormType())));
 								const std::string bt = r->GetBaseObject() ? lower(std::string(RE::FormTypeToString(r->GetBaseObject()->GetFormType()))) : std::string{};
 								if (t.find(needle) == std::string::npos && bt.find(needle) == std::string::npos)
+									return RE::BSContainer::ForEachResult::kContinue;
+							}
+							if (!modelNeedle.empty()) {
+								auto*       model = r->GetBaseObject() ? r->GetBaseObject()->As<RE::TESModel>() : nullptr;
+								const char* path = model ? model->GetModel() : nullptr;
+								if (!path || lower(std::string(path)).find(modelNeedle) == std::string::npos)
 									return RE::BSContainer::ForEachResult::kContinue;
 							}
 							++total;
@@ -1382,7 +1904,7 @@ namespace dvb
 			if (auto entry = ToolExtensions::Find("inspect", kind))
 				return entry->handler(a_args, a_ctx);
 
-			throw ToolError(400, std::format("unknown kind '{}' (state|vm|scene|mods|player|inventory|quests|effects|refs|registrants|screenshots|extensions, or a registered kind — see inspect kind=extensions)", kind));
+			throw ToolError(400, std::format("unknown kind '{}' (state|vm|scene|mods|player|inventory|quests|effects|refs|lights|registrants|screenshots|extensions, or a registered kind — see inspect kind=extensions)", kind));
 		}
 
 		// camera: read or set the player camera point of view, so a recording can capture the
@@ -1410,6 +1932,21 @@ namespace dvb
 						{ "freeCamOwned", FreeCamera::IsOwned() },
 						{ "stateId", cam->currentState ? json(static_cast<std::uint32_t>(cam->currentState->id)) : json(nullptr) },
 						{ "freeCamBackend", REL::Module::IsVR() ? "vr-state" : "engine" } };
+					if (cam->IsInThirdPerson() && !REL::Module::IsVR()) {  // VR's ThirdPersonState layout is not mapped
+						if (auto* tps = static_cast<RE::ThirdPersonState*>(cam->currentState.get())) {
+							out["thirdPersonState"] = json{
+								{ "targetYaw", tps->targetYaw },
+								{ "currentYaw", tps->currentYaw },
+								{ "targetZoomOffset", tps->targetZoomOffset },
+								{ "currentZoomOffset", tps->currentZoomOffset },
+								{ "posOffsetExpected", json::array({ tps->posOffsetExpected.x, tps->posOffsetExpected.y, tps->posOffsetExpected.z }) },
+								{ "posOffsetActual", json::array({ tps->posOffsetActual.x, tps->posOffsetActual.y, tps->posOffsetActual.z }) },
+								{ "freeRotation", json::array({ tps->freeRotation.x, tps->freeRotation.y }) },
+								{ "freeRotationEnabled", tps->freeRotationEnabled },
+							};
+						}
+					}
+					out["orbit"] = OrbitJson();
 					if (cam->cameraRoot) {
 						const auto& t = cam->cameraRoot->world.translate;
 						out["camX"] = t.x;
@@ -1418,7 +1955,13 @@ namespace dvb
 						if (RE::NiPoint3 e; cam->cameraRoot->world.rotate.ToEulerAnglesXYZ(e)) {
 							out["camPitch"] = e.x;
 							out["camYaw"] = e.z;
+							out["camAngles"] = "worldEuler";
 						}
+					}
+					if (const auto native = FreeCamera::OwnedAngles()) {
+						out["camPitch"] = native->pitch;
+						out["camYaw"] = native->yaw;
+						out["camAngles"] = "freeCameraState";
 					}
 					return out;
 				});
@@ -1429,8 +1972,9 @@ namespace dvb
 				const bool on = a_args.value("on", true);
 				const auto session = FreeCamera::CurrentSession();
 				return MainThread::RunAndWait([on, session]() {
+					const bool orbitEnded = on && CameraOrbit::State().On();
 					FreeCamera::SetEnabled(on, session);
-					return json{ { "queued", false }, { "action", "freecam" }, { "on", on }, { "freeCam", on } };
+					return json{ { "queued", false }, { "action", "freecam" }, { "on", on }, { "freeCam", on }, { "orbitEnded", orbitEnded } };
 				});
 			}
 
@@ -1449,8 +1993,125 @@ namespace dvb
 				});
 			}
 
+			if (action == "frame") {
+				const std::string target = a_args.value("formId", std::string{});
+				if (target.empty())
+					throw ToolError(400, "camera frame requires 'formId' (FormID, EditorID or bare hex FormID of a placed reference)");
+				const std::string sideName = a_args.value("side", std::string("front"));
+				const auto        side = CameraFrame::ParseSide(sideName);
+				if (!side)
+					throw ToolError(400, "camera frame 'side' must be front | back | left | right | top | bottom");
+				auto number = [&](const char* a_key) -> std::optional<double> {
+					if (!a_args.contains(a_key))
+						return std::nullopt;
+					if (!a_args[a_key].is_number() || !std::isfinite(a_args[a_key].get<double>()))
+						throw ToolError(400, std::format("camera frame '{}' must be a finite number", a_key));
+					return a_args[a_key].get<double>();
+				};
+				CameraFrame::Options opts;
+				opts.side = *side;
+				if (const auto v = number("aroundDeg"))
+					opts.aroundRad = *v * CameraFrame::kDegToRad;
+				if (const auto v = number("distance"))
+					opts.distance = *v;
+				if (const auto v = number("distanceScale"))
+					opts.distanceScale = *v;
+				if (const auto v = number("eyeHeight"))
+					opts.eyeFraction = *v;
+				if (const auto v = number("pitchDeg"))
+					opts.pitchRad = *v * CameraFrame::kDegToRad;
+				if (const auto problem = CameraFrame::Validate(opts))
+					throw ToolError(400, std::format("camera frame {}", *problem));
+				const auto session = FreeCamera::CurrentSession();
+				return MainThread::RunAndWait([target, sideName, opts, session]() -> json {
+					auto* form = LookupFormArg(target);
+					auto* ref = form ? form->As<RE::TESObjectREFR>() : nullptr;
+					if (!ref)
+						throw ToolError(404, std::format("camera frame: '{}' is not a placed reference", target));
+					const auto          position = ref->GetPosition();
+					const auto          boundMin = ref->GetBoundMin();
+					const auto          boundMax = ref->GetBoundMax();
+					CameraFrame::Target place;
+					place.x = position.x;
+					place.y = position.y;
+					place.z = position.z;
+					place.heading = ref->GetAngle().z;
+					place.boundMinZ = boundMin.z;
+					place.boundMaxZ = boundMax.z;
+					const CameraFrame::Pose pose = CameraFrame::Frame(place, opts);
+					FreeCamera::Drive(static_cast<float>(pose.x), static_cast<float>(pose.y), static_cast<float>(pose.z),
+						static_cast<float>(pose.pitch), static_cast<float>(pose.yaw), session);
+					return json{
+						{ "queued", false },
+						{ "action", "frame" },
+						{ "side", sideName },
+						{ "target", IdentifyForm(ref) },
+						{ "pose", json{ { "x", pose.x }, { "y", pose.y }, { "z", pose.z }, { "pitch", pose.pitch }, { "yaw", pose.yaw } } },
+					};
+				});
+			}
+
+			// orbit: hold the gameplay third-person camera round the player. yawDeg 0 is behind, 180 in front; pitchDeg tilts
+			// (positive looks down; omitted leaves the tilt); zoom is the game's zoom offset in [-1, 1] (omitted keeps it);
+			// right / up offset the camera (omitted keeps the game's own). No free camera is involved, so gameplay input still
+			// reaches the player. on=false hands the camera back.
+			if (action == "orbit") {
+				if (a_args.contains("on") && !a_args["on"].is_boolean())
+					throw ToolError(400, "camera orbit 'on' must be a boolean");
+				const bool on = a_args.value("on", true);
+				if (!on) {
+					return MainThread::RunAndWait([]() -> json {
+						const bool wasOn = CameraOrbit::End(CameraOrbit::EndReason::kRequested);
+						return json{ { "action", "orbit" }, { "on", false }, { "wasOn", wasOn }, { "orbit", OrbitJson() } };
+					});
+				}
+				for (const char* key : { "yawDeg", "pitchDeg", "zoom", "right", "up" })
+					if (a_args.contains(key) && !a_args[key].is_number())
+						throw ToolError(400, std::format("camera orbit '{}' must be a number", key));
+				const float yaw = a_args.value("yawDeg", 180.0f);
+				const float pitch = a_args.value("pitchDeg", 0.0f);
+				const float zoom = a_args.value("zoom", 0.0f);
+				const float right = a_args.value("right", 0.0f), up = a_args.value("up", 0.0f);
+				if (!std::isfinite(yaw) || !std::isfinite(pitch) || !std::isfinite(zoom) || !std::isfinite(right) || !std::isfinite(up))
+					throw ToolError(400, "camera orbit requires finite yawDeg / pitchDeg / zoom / right / up");
+				if (zoom < -1.0f || zoom > 1.0f)
+					throw ToolError(400, "camera orbit 'zoom' must be within [-1, 1]");
+				if (pitch < -89.0f || pitch > 89.0f)
+					throw ToolError(400, "camera orbit 'pitchDeg' must be within [-89, 89]");
+				constexpr float      kDeg = 3.14159265f / 180.0f;
+				CameraOrbit::Request request;
+				request.yawRad = yaw * kDeg;
+				if (a_args.contains("pitchDeg"))
+					request.pitchRad = pitch * kDeg;
+				if (a_args.contains("zoom"))
+					request.zoom = zoom;
+				if (a_args.contains("right") || a_args.contains("up"))
+					request.offset = CameraOrbit::Vec3{ right, 0.0f, up };
+				const auto session = CameraOrbit::CurrentSession();
+				return MainThread::RunAndWait([request, session]() -> json {
+					auto* cam = RE::PlayerCamera::GetSingleton();
+					if (!cam)
+						throw ToolError(500, "PlayerCamera unavailable");
+					switch (CameraOrbit::Enable(request, session)) {
+					case CameraOrbit::Admission::kStaleSession:
+						throw ToolError(409, "camera orbit was requested before a load or new game; request it again");
+					case CameraOrbit::Admission::kLoading:
+						throw ToolError(409, "camera orbit is unavailable while the game is loading");
+					case CameraOrbit::Admission::kFreeCamera:
+						throw ToolError(409, "camera orbit holds the third-person camera; leave the free camera first");
+					case CameraOrbit::Admission::kUnsupportedRuntime:
+						throw ToolError(501, "camera orbit is not available on VR yet");
+					default:
+						break;
+					}
+					if (!cam->IsInThirdPerson())
+						cam->ForceThirdPerson();
+					return json{ { "action", "orbit" }, { "on", true }, { "thirdPerson", cam->IsInThirdPerson() }, { "orbit", OrbitJson() } };
+				});
+			}
+
 			if (action != "setPov")
-				throw ToolError(400, std::format("unknown action '{}' (get|setPov|freecam|drive)", action));
+				throw ToolError(400, std::format("unknown action '{}' (get|setPov|freecam|drive|orbit)", action));
 
 			const std::string pov = a_args.value("pov", std::string{});
 			if (pov != "first" && pov != "third" && pov != "vanity")
@@ -1461,6 +2122,7 @@ namespace dvb
 				auto* cam = RE::PlayerCamera::GetSingleton();
 				if (!cam)
 					throw ToolError(500, "PlayerCamera unavailable");
+				const bool orbitEnded = CameraOrbit::End(CameraOrbit::EndReason::kPov);
 				if (pov == "first")
 					cam->ForceFirstPerson();
 				else if (pov == "third")
@@ -1474,7 +2136,7 @@ namespace dvb
 					applied = "third";
 				else if (cam->currentState && cam->currentState->id == RE::CameraState::kAutoVanity)
 					applied = "vanity";
-				return json{ { "action", "setPov" }, { "requestedPov", pov }, { "pov", applied } };
+				return json{ { "action", "setPov" }, { "requestedPov", pov }, { "pov", applied }, { "orbitEnded", orbitEnded } };
 			});
 		}
 
@@ -1718,11 +2380,31 @@ namespace dvb
 						return false;
 				return true;
 			}
+			if (a_cond == "weaponDrawn" || a_cond == "handsReady" || a_cond == "castingArtLeft" || a_cond == "castingArtRight") {
+				try {
+					const json r = MainThread::RunAndWait([a_cond]() -> json {
+						auto* pc = RE::PlayerCharacter::GetSingleton();
+						if (!pc || !pc->Get3D())
+							return false;
+						const auto snap = SnapshotHands(pc, nullptr, nullptr);
+						if (a_cond == "weaponDrawn")
+							return snap.observation.settledDrawn;
+						if (a_cond == "handsReady")
+							return InspectLogic::HandsReady(snap.observation);
+						const auto& hand = a_cond == "castingArtLeft" ? snap.observation.left : snap.observation.right;
+						return hand.casterPresent && hand.artAttached;
+					},
+						milliseconds(2000));
+					return r.get<bool>();
+				} catch (const ToolError&) {
+					return false;
+				}
+			}
 			if (a_cond == "noMenu")
 				return GetOpenMenus().empty();
 			if (a_cond == "noBlockingMenu")
 				return BlockingMenus().empty();
-			throw ToolError(400, std::format("unknown waitUntil condition '{}' (playerLoaded|noModal|noMenu|noBlockingMenu)", a_cond));
+			throw ToolError(400, std::format("unknown waitUntil condition '{}' (playerLoaded|noModal|noMenu|noBlockingMenu|weaponDrawn|handsReady|castingArtLeft|castingArtRight)", a_cond));
 		}
 
 		// Caller must already know a_args["runId"] is present. A bare get<uint64_t>() on a
@@ -2247,7 +2929,28 @@ namespace dvb
 				"'scene' → player context { cell, worldspace, location, position, gameHour, daysPassed, "
 				"weather }; 'mods' → active load order { count, lightCount, total, plugins:[{index, name}], "
 				"lightPlugins:[…] }; 'player' → player snapshot { name, level, sex, gold, race, "
-				"actorValues:{health,magicka,stamina,carryWeight each {current,max}}, equipped:{right,left,ammo} }; "
+				"actorValues:{health,magicka,stamina,carryWeight each {current,max}}, equipped:{right,left,ammo}, "
+				"hands:{weaponDrawn (broad: drawn or about to sheathe), weaponState, weaponSettledDrawn (exactly drawn), "
+				"castingArtReady (every spell hand's caster flags its art attached; says nothing about which art), "
+				"handsReady (settled drawn, and every spell hand's attach sequence finished: no art pending, no clone task, "
+				"the attached flag set and an attached art node recorded; it does not compare the model with the spell and "
+				"is not proof a rendered frame shows it), left/right:{equipped, heldLights (every light under the hand's first "
+				"WEAPON/SHIELD node in each view, with view, lightId and inScene), heldLightEntriesInScene (entries in the "
+				"scene's active/shadow lists - not proof a light is visible), heldLightsUnique, heldLightsUniqueInScene, "
+				"heldLightSearch [{view, node, match, rootLoaded, nodeFound}], heldLightSearchComplete (false: an empty list "
+				"does not prove the hand holds no light; firstPerson is searched only when the actor has its own first-person 3D), "
+				"caster:{state, currentSpell, castingArt (the "
+				"art still to attach; null once attached), castingArtPending, pendingArtMatchesEquipped (null when nothing "
+				"is pending), castingArtLoading, castingArtAttached, attachedArtNode, light}}} (caster, light and "
+				"attachedArtNode null when absent) }; "
+				"'lights' → every NiLight under a reference's 3D (default the player: thirdPerson + firstPerson; "
+				"or 'formId' / 'selected') as {name, type, path, diffuse, radius, fade, fadeAmount, appCulled, "
+				"inScene:'active'|'shadow'|false, position}, plus an actor's hands (each hand's casting light); "
+				"scope='scene' instead lists every light the renderer is using, nearest first (ties by name, path, "
+				"position), each with its 'owner' reference and 'distance' (null when the player's position is "
+				"unknown; 'radius' then refused with 409), ('radius', 'limit'). Every lights read has one budget "
+				"for nodes visited, parent steps and lights emitted, reports it under 'coverage' with 'truncated' "
+				"and 'truncatedBy', and names its 'observation' source; "
 				"'inventory' → items held by the player (or a container 'formId') { owner, count, items:[{formId, "
 				"name, formType, count, value, weight, equipped}] } (filters: 'formType', 'limit'); "
 				"'quests' → journal (running/completed) { count, quests:[{formId, name, stage, type, active, "
@@ -2255,9 +2958,16 @@ namespace dvb
 				"'effects' → active magic effects on the player (or an actor 'formId') { target, count, "
 				"activeEffects:[{spell, effect, magnitude, duration, elapsed}] }; "
 				"'refs' → identify reference(s) sharing one shape { formId, formType, name, "
-				"editorId, base, position } — pass 'formId' for one form, 'selected'=true for the "
+				"editorId, base, position, rotation, cell, model, bounds } — 'model' is the base "
+				"object's mesh (.nif) path when it has one; 'bounds' is { min, max } local extents "
+				"for framing a shot; an actor ref also carries actor { level, health, healthMax, "
+				"stamina, staminaMax, attackState (the console's GetAttackState: 0 none, 2 swing, 3 hit, "
+				"...), hostileToPlayer, playerTeammate, alive, loaded3D } and, when the ref has no name, its "
+				"display name; pass 'formId' for one form, 'selected'=true for the "
 				"console/crosshair ref (set via prid), or neither to enumerate loaded refs in the grid "
-				"(optional 'formType' filter, 'radius' from player, 'limit' default 100). "
+				"(optional 'formType' filter, 'model' substring filter against the base object's mesh path, "
+				"'radius' from player, 'limit' default 100); 'model' matches statics and furniture — "
+				"actors normally have no base mesh, so list NPCs with 'formType'=Actor. "
 				"'registrants' → who has requested the C-ABI interface and what they registered "
 				"through it { consumers:[{name,atEpoch,atFrame}], registrations:[{kind,name,atEpoch,"
 				"atFrame,replaced}], capabilities:{capture,inspect,menu → [registered keys]} } — "
@@ -2272,18 +2982,20 @@ namespace dvb
 				"'extensions' lists those registered kinds + descriptors, and kind=<registered> dispatches.";
 			inspect.description += RegisteredExtensionSummary("inspect", "kinds");
 			inspect.readOnly = true;
-			json kinds = json::array({ "state", "health", "vm", "scene", "mods", "player", "inventory", "quests", "effects", "refs", "registrants", "screenshots", "extensions" });
+			json kinds = json::array({ "state", "health", "vm", "scene", "mods", "player", "inventory", "quests", "effects", "refs", "lights", "registrants", "screenshots", "extensions" });
 			for (const auto& k : ToolExtensions::Keys("inspect"))
 				kinds.push_back(k);
 			inspect.inputSchema = json{
 				{ "type", "object" },
 				{ "properties", json{
-									{ "kind", json{ { "type", "string" }, { "enum", kinds }, { "description", "state | health | vm | scene | mods | player | inventory | quests | effects | refs | registrants | screenshots | extensions (health answers off-thread for liveness+identity; or a registered mod kind — listed here + via kind=extensions)" } } },
-									{ "formId", json{ { "type", "string" }, { "description", "refs: identify this form; inventory: the container ref to read (default player); effects: the actor to read (default player) (hex formId, e.g. 0x14, or EditorID)" } } },
-									{ "selected", json{ { "type", "boolean" }, { "description", "refs: identify the console-selected / crosshair ref instead" } } },
+									{ "kind", json{ { "type", "string" }, { "enum", kinds }, { "description", "state | health | vm | scene | mods | player | inventory | quests | effects | refs | lights | registrants | screenshots | extensions (health answers off-thread for liveness+identity; or a registered mod kind — listed here + via kind=extensions)" } } },
+									{ "formId", json{ { "type", "string" }, { "description", "refs: identify this form; inventory: the container ref to read (default player); effects: the actor to read (default player); lights: the reference whose 3D to read (default player) (hex formId, e.g. 0x14, or EditorID)" } } },
+									{ "selected", json{ { "type", "boolean" }, { "description", "refs/lights: use the console-selected / crosshair ref instead" } } },
+									{ "scope", json{ { "type", "string" }, { "enum", json::array({ "ref", "scene" }) }, { "description", "lights: 'ref' (default) reads one reference's 3D; 'scene' lists every light the renderer is using, nearest the player first, each with the reference it hangs under; any other value is refused (400)" } } },
 									{ "formType", json{ { "type", "string" }, { "description", "refs/inventory: keep only entries whose type matches (e.g. Actor, Weapon, Potion)" } } },
-									{ "radius", json{ { "type", "number" }, { "description", "refs enumerate: only refs within this distance of the player (0 = whole loaded grid)" } } },
-									{ "limit", json{ { "type", "integer" }, { "description", "refs/inventory: max entries to return (default 100)" } } },
+									{ "model", json{ { "type", "string" }, { "description", "refs enumerate: keep only refs whose base object's mesh path contains this substring (case-insensitive, e.g. 'wrcity01'); matches statics and furniture, not actors" } } },
+									{ "radius", json{ { "type", "number" }, { "description", "refs enumerate: only refs within this distance of the player (0 = whole loaded grid); lights scope=scene: only lights within it (0 = no limit)" } } },
+									{ "limit", json{ { "type", "integer" }, { "description", "refs/inventory/lights: max entries to return (default 100; lights: lights emitted, 0..50000)" } } },
 								} },
 			};
 			return inspect;
@@ -2329,14 +3041,20 @@ namespace dvb
 		console.description =
 			"Run a Skyrim console command. action='exec' (default) queues `command` onto the main "
 			"thread (runs next tick). With capture=true it is fenced between marker commands and exec "
-			"returns once the output has landed, so a following action='read' returns the command's "
-			"output as { markersFound, lines:[...], source, lossPossible }. source='buffer' is complete, "
-			"including several lines printed in one frame (e.g. `help`). source='sampler' is used once "
-			"the Console menu has been created, when the game stops filling that buffer: it sees one "
-			"line per frame, so a command that prints SEVERAL lines in a frame keeps only the last "
-			"(lossPossible=true); getav, getgs and getpos are exact. A second capture while one is "
-			"running gets 409. exec then returns { queued:false, completed }, completed=false meaning "
-			"the end marker never arrived and `lines` may be incomplete; a capture that never sees its "
+			"returns once the output has landed, with the command's output as lines:[...]; "
+			"action='read' returns that output again as { markersFound, lines:[...], source, "
+			"lossPossible } (plus diag). source='print' (the normal "
+			"case) comes from a hook on the console's print function and holds EVERY line printed "
+			"between the markers, from the game or any plugin, whether or not the Console menu exists "
+			"(lossPossible only past 20000 lines or 4 MiB, counted in diag.printDropped). The fallbacks, used only when that hook could not "
+			"be installed (diag.printHooked=false): source='buffer' is complete, including several "
+			"lines printed in one frame (e.g. `help`); source='sampler' is used once the Console menu "
+			"has been created, when the game stops filling that buffer: it sees one line per frame, so "
+			"a command that prints SEVERAL lines in a frame keeps only the last (lossPossible=true). "
+			"Both return the most recent 'maxLines' lines (default 200). A second capture while one is "
+			"running gets 409. exec then returns { queued:false, completed, lines, lossPossible }, "
+			"completed=false meaning the end marker never arrived and `lines` may be incomplete (no "
+			"`lines` when the main thread was too busy to take the output; 'read' has none then either); a capture that never sees its "
 			"begin marker gets 504 and the command is not run. "
 			"`save <name>`/`load <name>` are rerouted to the `game` tool's save/load "
 			"path and return { redirected:'game' } — saves use SKSE's queued request "
@@ -2344,9 +3062,10 @@ namespace dvb
 		console.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
-								{ "action", json{ { "type", "string" }, { "enum", json::array({ "exec", "read" }) }, { "description", "'exec' (default) runs `command`; 'read' returns the fenced output and closes the window" } } },
+								{ "action", json{ { "type", "string" }, { "enum", json::array({ "exec", "read" }) }, { "description", "'exec' (default) runs `command`; 'read' returns the last capture's fenced output" } } },
 								{ "command", json{ { "type", "string" }, { "description", "the console command, exactly as typed after ~ (required for exec)" } } },
-								{ "capture", json{ { "type", "boolean" }, { "description", "exec: fence and capture this command's output for the next read" } } },
+								{ "capture", json{ { "type", "boolean" }, { "description", "exec: fence and capture this command's output; exec returns it as `lines`, and 'read' returns it again" } } },
+								{ "maxLines", json{ { "type", "integer" }, { "description", "exec with capture, read: most recent lines to return (default 200, max 20000)" } } },
 							} },
 		};
 		a_registry.Register(std::move(console), &ConsoleHandler);
@@ -2373,11 +3092,16 @@ namespace dvb
 			"'scale', or 'freeze':true for 0) speeds up or slows down the game itself for "
 			"'holdMs' (default 60000) — which is what makes a replay or scenario run faster in wall "
 			"time — then restores the previous scale; 0.1..3.0, up to 10.0 with 'allowHigh':true, and "
-			"it returns { requested, effective, applied, owner, leaseRemainingMs } only once the "
-			"engine is actually running at the requested scale (the reconciler applies it on the next "
-			"frame and the engine then ramps). It is refused (409) while a recording or a capture is "
-			"in flight, unless 'allowTimeScale':true. 'getTimeScale' returns the same object without "
-			"changing anything.";
+			"every request gets a 'generation' and one terminal snapshot { generation, state, requested, "
+			"effective, owner, leased, leaseRemainingMs, reached, applied, admissionMs, waitedMs }. state is "
+			"accepted (recorded, not yet handed to the engine), written (the engine has its value but is still "
+			"ramping toward it), reached, expired (its lease ran out) or displaced (a later request or a release "
+			"replaced it); applied = written or reached. It waits up to 'waitMs' (default 2000, 0..30000) after "
+			"admission for reached / expired / displaced; admissionMs and waitedMs are reported apart. A request "
+			"that has not reached is an answer, not an error, unless 'requireReached':true (504, the old "
+			"behaviour). It is refused (409) while a recording or a capture is "
+			"in flight, unless 'allowTimeScale':true. 'getTimeScale' returns { requested, effective, owner, "
+			"leased, leaseRemainingMs } without changing anything.";
 		game.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
@@ -2393,6 +3117,8 @@ namespace dvb
 								{ "freeze", json{ { "type", "boolean" }, { "description", "setTimeScale: confirm scale 0 (freeze); required with a 0 scale" } } },
 								{ "allowHigh", json{ { "type", "boolean" }, { "description", "setTimeScale: permit a scale above 3.0, up to 10.0" } } },
 								{ "allowTimeScale", json{ { "type", "boolean" }, { "description", "setTimeScale: change the scale even while a recording or capture is in flight (default false)" } } },
+								{ "waitMs", json{ { "type", "integer" }, { "description", "setTimeScale: how long to wait, after admission, for this request to settle (reached, expired or displaced) before answering (default 2000, 0..30000)" } } },
+								{ "requireReached", json{ { "type", "boolean" }, { "description", "setTimeScale: answer 504 when the request has not reached the engine within waitMs, as before waitMs existed (default false: answer with its state)" } } },
 							} },
 		};
 		a_registry.Register(std::move(game), &GameHandler);
@@ -2401,7 +3127,8 @@ namespace dvb
 		camera.name = "camera";
 		camera.description =
 			"Read or set the player camera. action='get' (default) returns { pov, freeCam, camX, "
-			"camY, camZ, camPitch, camYaw, stateId, freeCamBackend, freeCamOwned } read live on the main thread, where pov is first | "
+			"camY, camZ, camPitch, camYaw, camAngles, stateId, freeCamBackend, freeCamOwned, orbit } (plus thirdPersonState: heading, zoom "
+			"and offsets, while in third person) read live on the main thread, where pov is first | "
 			"third | vanity | other. stateId is the runtime-specific CameraState value; interpret it "
 			"with freeCamBackend. action='setPov' applies a switch (param 'pov': first | third "
 			"| vanity) on the main thread and returns { pov: <applied>, requestedPov } read back "
@@ -2416,8 +3143,22 @@ namespace dvb
 			"action='drive' (params 'x','y','z','pitch','yaw', all default 0) "
 			"sets the free camera's world transform — requires free-cam mode already on. "
 			"pitch/yaw are native free-camera angles in radians on both runtimes, writing "
-			"FreeCameraState::rotation directly; completes its field writes before return, so allow "
-			"a rendered frame before capture. "
+			"FreeCameraState::rotation directly; yaw increases clockwise from +Y (north) and the view "
+			"direction is (sin yaw, cos yaw) at pitch 0, the same sense as a reference's heading in "
+			"inspect refs rotation[2] (observed on AE 1.7.104 and VR 1.4.15; VR reports a negative yaw as the equivalent angle plus 2 pi). Completes its field writes before "
+			"return, so allow a rendered frame before capture. "
+			"While devbench owns the free camera, get reports camPitch/camYaw as exactly those native "
+			"angles (camAngles='freeCameraState'); otherwise they are generic XYZ Euler angles of the "
+			"camera's world rotation (camAngles='worldEuler'), which can differ in sign and branch "
+			"from the direction the camera renders and should not be used to verify a pose. "
+			"action='orbit' (params yawDeg default 180, pitchDeg, zoom, right, up; on=false stops) holds the gameplay "
+			"third-person camera round the player on every camera update, with the player's facing held for the orbit - no "
+			"free camera, so gameplay input keeps reaching the player (a held mouseLeft keeps charging a spell, for example). "
+			"It is refused (409) while the free camera is on, during a load, or when requested before a load / new game. "
+			"It ends - writing back the heading, tilt, zoom and offsets it overwrote - on on=false, when the camera leaves "
+			"third person (any POV switch), on freecam on or setPov (both answer orbitEnded), and is dropped without "
+			"restoring on load / new game. get reports orbit { on, applied, requested, lastEnd, session, revision }. "
+			"Not available on VR yet (501). "
 			"enable, disable, and drive all reject an active free camera owned elsewhere; "
 			"freeCamOwned reports devbench's own ownership. "
 			"On VR, after failed pre-load restoration, freecam off retries recovery using the "
@@ -2428,18 +3169,37 @@ namespace dvb
 			"record{action:'replay'} drives it exactly via this tool's freecam+drive instead of "
 			"setPov, since head-look is a degree of freedom setpos+setPov can't reproduce, on "
 			"either runtime. Devbench's own replay always owns and releases the free camera itself "
-			"for that duration.";
+			"for that duration. "
+			"action='frame' (param 'formId' of a placed reference; optional 'side' front (default) | back | left | right | top | "
+			"bottom, 'aroundDeg', 'distance', 'distanceScale', 'eyeHeight', 'pitchDeg') drives the free camera, which must already "
+			"be on, to look at that reference from one side and returns { side, target, pose: { x, y, z, pitch, yaw } }. front, "
+			"back, left and right are relative to the reference's own heading (inspect refs rotation[2]) with right on its clockwise "
+			"side; top looks straight down with the image's up being its front, bottom straight up. The camera sits 1.4 x the "
+			"reference's height away (distanceScale scales that, distance sets units) at eyeHeight (default 0.85) of its height; "
+			"aroundDeg replaces the side's horizontal angle. Heading and bounds come from the reference, so it suits actors and "
+			"placed objects; one without bounds is framed as a 128-unit-tall target.";
 		camera.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
-								{ "action", json{ { "type", "string" }, { "enum", json::array({ "get", "setPov", "freecam", "drive" }) }, { "description", "get (default) | setPov | freecam | drive" } } },
+								{ "action", json{ { "type", "string" }, { "enum", json::array({ "get", "setPov", "freecam", "drive", "orbit", "frame" }) }, { "description", "get (default) | setPov | freecam | drive | orbit | frame" } } },
+								{ "yawDeg", json{ { "type", "number" }, { "description", "orbit: degrees round the player (0 behind, 180 in front; default 180)" } } },
+								{ "pitchDeg", json{ { "type", "number" }, { "minimum", -89 }, { "maximum", 89 }, { "description", "orbit: tilt in degrees, positive looks down (omit to leave it); frame: camera tilt, positive looks down (default 0; top and bottom use +-89)" } } },
+								{ "formId", json{ { "type", "string" }, { "description", "frame: the placed reference to look at (FormID, EditorID or bare hex FormID)" } } },
+								{ "side", json{ { "type", "string" }, { "enum", json::array({ "front", "back", "left", "right", "top", "bottom" }) }, { "description", "frame: which side to look from (default front); front/back/left/right are relative to the reference's heading" } } },
+								{ "aroundDeg", json{ { "type", "number" }, { "description", "frame: degrees clockwise from the reference's front, replacing the side's horizontal angle" } } },
+								{ "distance", json{ { "type", "number" }, { "exclusiveMinimum", 0 }, { "maximum", CameraFrame::kMaxDistance }, { "description", "frame: camera distance in world units (default 1.4 x the reference's height)" } } },
+								{ "distanceScale", json{ { "type", "number" }, { "exclusiveMinimum", 0 }, { "maximum", CameraFrame::kMaxDistanceScale }, { "description", "frame: multiplier on the default distance (default 1)" } } },
+								{ "eyeHeight", json{ { "type", "number" }, { "minimum", 0 }, { "maximum", CameraFrame::kMaxEyeFraction }, { "description", "frame: camera height as a fraction of the reference's height (default 0.85)" } } },
+								{ "zoom", json{ { "type", "number" }, { "minimum", -1 }, { "maximum", 1 }, { "description", "orbit: the game's third-person zoom offset (omit to keep it)" } } },
+								{ "right", json{ { "type", "number" }, { "description", "orbit: camera offset to the side in units (with up; omit both to keep the game's own)" } } },
+								{ "up", json{ { "type", "number" }, { "description", "orbit: camera offset up in units" } } },
 								{ "pov", json{ { "type", "string" }, { "enum", json::array({ "first", "third", "vanity" }) }, { "description", "setPov: target point of view" } } },
 								{ "on", json{ { "type", "boolean" }, { "description", "freecam: enable (default) or disable free-camera mode" } } },
 								{ "x", json{ { "type", "number" }, { "description", "drive: world X (requires free-cam mode)" } } },
 								{ "y", json{ { "type", "number" }, { "description", "drive: world Y (requires free-cam mode)" } } },
 								{ "z", json{ { "type", "number" }, { "description", "drive: world Z (requires free-cam mode)" } } },
 								{ "pitch", json{ { "type", "number" }, { "description", "drive: native free-cam pitch in radians (FreeCameraState::rotation.x)" } } },
-								{ "yaw", json{ { "type", "number" }, { "description", "drive: native free-cam yaw in radians (FreeCameraState::rotation.y)" } } },
+								{ "yaw", json{ { "type", "number" }, { "description", "drive: native free-cam yaw in radians (FreeCameraState::rotation.y), clockwise from +Y; 0 looks along +Y" } } },
 							} },
 		};
 		a_registry.Register(std::move(camera), &CameraHandler);
@@ -2474,13 +3234,20 @@ namespace dvb
 			"name) and returns its { globalFunctions, memberFunctions, properties }, each function "
 			"with params + returnType — use it to discover what 'call' can invoke. 'call' runs a "
 			"function via the VM: 'script' + 'function' (+ optional 'args' array, 'timeoutMs' "
-			"default 3000) and returns { called, returned, returnedType }. Unlike console 'cgf', "
+			"default 3000) and returns { called, returned, returnedType }. Omitted trailing optional "
+			"args are filled from a table of known Papyrus defaults (PlaceAtMe aiCount=1, MoveTo "
+			"abMatchRotation=true, ...) when script, function, position, name and type all match; "
+			"any other omitted arg refuses the call (400, nothing runs) unless 'fillNeutral':true, "
+			"which sends None/0/false/\"\" instead. Fills are listed under 'filledArgs' (source "
+			"table|neutral) with a 'warning' for any neutral guess. A 504 says whether the call was "
+			"already dispatched (it may still run). "
+			"Unlike console 'cgf', "
 			"this hands the return value back (e.g. Utility.GetCurrentGameTime → a Float). Pass "
 			"'self' to call a MEMBER function on a target: { \"form\": \"0x14 | EditorID\" } targets "
 			"any form, or \"selected\" uses the console/crosshair ref (set via prid); without 'self' "
 			"only global/native functions are callable. args and returns support bool/number/string, "
-			"{ \"form\": … } (a form return resolves to { formId, formType, editorId, name }), and "
-			"arrays of scalars.";
+			"{ \"form\": … } (a form return resolves to { formId, formType, editorId, name }), "
+			"arrays of scalars, and null for None (object and array params).";
 		papyrus.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
@@ -2488,10 +3255,11 @@ namespace dvb
 								{ "script", json{ { "type", "string" }, { "description", "describe/call: the Papyrus script class name, e.g. Utility, Game, Actor" } } },
 								{ "function", json{ { "type", "string" }, { "description", "call: the function name, e.g. GetCurrentGameTime or GetActorValue" } } },
 								{ "self", json{ { "description", "call: target a member function — { \"form\": \"0x14 | EditorID\" } or \"selected\" (console/crosshair ref). Omit for global/native functions." } } },
-								{ "args", json{ { "type", "array" }, { "description", "call: arguments; each a bool/number/string, { \"form\": \"0x14 | EditorID\" }, or an array of scalars" } } },
+								{ "args", json{ { "type", "array" }, { "description", "call: arguments; each a bool/number/string, { \"form\": \"0x14 | EditorID\" }, an array of scalars, or null for None (object and array params)" } } },
 								{ "filter", json{ { "type", "string" }, { "description", "list: case-insensitive substring to match class names" } } },
 								{ "limit", json{ { "type", "integer" }, { "description", "list: max class names to return (default 200)" } } },
 								{ "timeoutMs", json{ { "type", "integer" }, { "description", "call: ms to wait for the result before 504 (default 3000)" } } },
+								{ "fillNeutral", json{ { "type", "boolean" }, { "description", "call: send None/0/false/\"\" for omitted args the defaults table does not know, instead of refusing the call (default false)" } } },
 							} },
 		};
 		a_registry.Register(std::move(papyrus), &Papyrus::Handle);
@@ -2507,7 +3275,11 @@ namespace dvb
 			"{\"waitFor\":<event>,…} block on a Skyrim EVENT — string shorthand "
 			"(\"postLoadGame\"/\"saveGame\"/\"newGame\"/\"preLoadGame\"/\"dataLoaded\"/\"deleteGame\", or "
 			"\"menuOpened\"/\"menuClosed\" with a \"name\"), or {\"topic\":\"…\",\"match\":{…}}; "
-			"{\"waitUntil\":\"playerLoaded\"|\"noModal\"|\"noMenu\"|\"noBlockingMenu\"} poll live state. "
+			"{\"waitUntil\":\"playerLoaded\"|\"noModal\"|\"noMenu\"|\"noBlockingMenu\"|\"weaponDrawn\"|"
+			"\"castingArtLeft\"|\"castingArtRight\"|\"handsReady\"} poll live state (handsReady: weapon settled drawn "
+			"and every spell hand finished its art attach sequence; not proof a rendered frame shows the art — "
+			"wait on it after EquipSpell + DrawWeapon "
+			"before a capture). "
 			"PREFER waitFor over a fixed wait — e.g. wait for postLoadGame to know a load truly "
 			"finished. Optional: repeat (≤1000), continueOnError, async. By default action='run' "
 			"BLOCKS the request for the run's duration and returns the transcript directly — the "

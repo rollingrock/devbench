@@ -298,7 +298,8 @@ namespace dvb
 		else
 			return json{ { "supported", false }, { "reason", "The stdio bridge does not know this game yet; use the native MCP or REST endpoint." } };
 		std::error_code   ec;
-		const std::string exePath = std::filesystem::absolute(host::DataDir() / "devbench-bridge.exe", ec).string();
+		const auto        exe = std::filesystem::absolute(host::DataDir() / "devbench-bridge.exe", ec);
+		const std::string exePath = Utf8(exe);
 		const std::string name = "devbench-" + game;
 		json              result{
 			{ "exePath", exePath },
@@ -315,10 +316,11 @@ namespace dvb
 				"are also mirrored to externalStateDir, which isn't virtualized, for exactly that reason." },
 		};
 		if (auto dir = ExternalStateDir())
-			result["externalStateDir"] = dir->string();
+			result["externalStateDir"] = Utf8(*dir);
 		// Only the Skyrim release archive ships the exe beside the plugin, so say whether
-		// the path above is real rather than hand out a snippet that cannot start.
-		result["exeFound"] = std::filesystem::exists(exePath, ec);
+		// the path above is real rather than hand out a snippet that cannot start. Test the
+		// path, not exePath: that is UTF-8, which Windows would read in the ANSI codepage.
+		result["exeFound"] = std::filesystem::exists(exe, ec);
 		if (!result["exeFound"].get<bool>())
 			result["exeNote"] =
 				"devbench-bridge.exe is not at exePath. It is one exe for every game: copy it there from "

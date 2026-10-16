@@ -62,6 +62,36 @@ def test_call_game_getplayer(client, papyrus):
     assert body.get("returnedType") == "Actor", body
 
 
+# Skyrim.esm's TGNightingalePowerHandler carries two scripts: its stage fragments and
+# TGNQuestScript, whose CanIAward() only reads the game time.
+TGN_QUEST = "0x0010B0E0"
+
+
+@pytest.mark.requires_player
+def test_call_returns_form_behind_attached_script(client, papyrus):
+    require_enum(papyrus, "action", "call")
+    body = client.ok(
+        "papyrus",
+        {"action": "call", "script": "Quest", "function": "GetQuest", "args": ["TGNightingalePowerHandler"]},
+    )
+    assert body.get("returned", {}).get("formId") == TGN_QUEST, body
+
+
+@pytest.mark.requires_player
+def test_call_member_of_named_attached_script(client, papyrus):
+    require_enum(papyrus, "action", "call")
+    body = client.ok(
+        "papyrus",
+        {
+            "action": "call",
+            "script": "TGNQuestScript",
+            "function": "CanIAward",
+            "self": {"form": TGN_QUEST},
+        },
+    )
+    assert isinstance(body.get("returned"), bool), body
+
+
 def test_call_game_getgamesettingfloat(client, papyrus):
     require_enum(papyrus, "action", "call")
     body = client.ok(
@@ -107,6 +137,39 @@ def test_call_member_getnumitems(client, papyrus):
     returned = body.get("returned")
     assert isinstance(returned, int) and not isinstance(returned, bool), body
     assert returned >= 0, body
+
+
+@pytest.mark.requires_player
+def test_call_passes_null_as_none(client, papyrus):
+    # RemoveItem's akOtherContainer = None: the removed gold is gone, not moved anywhere.
+    require_enum(papyrus, "action", "call")
+
+    def player(function, *args):
+        return client.ok(
+            "papyrus",
+            {"action": "call", "script": "ObjectReference", "function": function,
+             "self": {"form": "0x14"}, "args": list(args)},
+        )
+
+    gold = {"form": "0xF"}
+    before = player("GetItemCount", gold)["returned"]
+    player("AddItem", gold, 1, True)
+    body = player("RemoveItem", gold, 1, True, None)
+    assert body.get("called") is True, body
+    assert "filledArgs" not in body, body
+    assert player("GetItemCount", gold)["returned"] == before
+
+
+@pytest.mark.requires_player
+def test_call_refuses_null_for_scalar_param(client, papyrus):
+    # None fits only object and array params; an int param must refuse it before dispatch.
+    require_enum(papyrus, "action", "call")
+    status, body = client.call(
+        "papyrus",
+        {"action": "call", "script": "Utility", "function": "RandomInt", "args": [None, 1]},
+    )
+    assert status == 400, (status, body)
+    assert isinstance(body, dict) and body.get("code") == 400, body
 
 
 def test_call_pads_omitted_optional_args(client, papyrus):
