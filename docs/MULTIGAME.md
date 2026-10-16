@@ -1,8 +1,8 @@
 # One devbench, several games
 
-_Status: branch `feat/multigame-core` on a fork of `alandtse/devbench`. The Fallout 4
-target builds; the Skyrim target's build change is mechanical and unverified. Written
-2026-08-15._
+_Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.28.0.
+Both targets build — Fallout 4 (CMake) and Skyrim (xmake) — and the host-independent
+unit tests pass. Written 2026-08-15; status updated 2026-10-16._
 
 This is the working note behind the split, and the thing to read before reviewing the
 branch. It answers three questions in order: **why a fork and not a port**, **where the
@@ -235,10 +235,10 @@ that claims less:
 - ✅ **The Fallout plugin runs in Fallout 4 VR.** Its endpoints answer live requests, and
   mods register tools through the C-ABI; [FALLOUT4.md](FALLOUT4.md) lists what has been
   confirmed. Flat Fallout 4 has not been loaded yet.
-- ❌ **The Skyrim xmake target has not been built since the move.** The change is
-  mechanical — recursive glob (unchanged), two `add_includedirs`, the PCH path, the
-  `RecordingsMenu` paths, and `remove_files("src/platform/fallout4/**.cpp")` — but
-  mechanical is not the same as verified, and CI is the right place to find out.
+- ✅ **The Skyrim xmake target builds after the move** (VS 2026, `releasedbg`, re-checked
+  2026-10-16 after the upstream 1.28.0 merge), and `devbench-tests` passes — 236 cases,
+  including the core files the merge added. Building is not running: this branch's Skyrim
+  DLL has not been loaded in Skyrim since that merge.
 - ⚠️ **`game::CurrentFrame()` on Fallout 4 VR** reads `BSGraphics::State::frameCount` at a
   measured image offset, because the VR address library does not cover that id. It is
   plausibility-gated and returns `-1` rather than a garbage number when the gate fails;
