@@ -21,10 +21,11 @@ if (!baseRef) {
 //
 // Registration files that feed every family's list: tools registered from the
 // shared core (ping, memory, log, ...) appear in each game's fallback.
+// GfxTools.cpp is core code but NOT shared: only a platform that implements the
+// graphics seam registers it (Fallout today), so it feeds only those lists.
 const SHARED_FILES = [
   "src/core/HostApi.cpp",
   "src/core/tools/CommonTools.cpp",
-  "src/core/tools/GfxTools.cpp",
 ];
 const FALLBACKS = {
   "bridge/src/tools-fallback.json": [
@@ -36,6 +37,7 @@ const FALLBACKS = {
   "bridge/src/tools-fallback-fallout4.json": [
     "src/platform/fallout4/Tools_Fallout4.cpp",
     "src/platform/fallout4/Nodes_Fallout4.cpp",
+    "src/core/tools/GfxTools.cpp",
     ...SHARED_FILES,
   ],
 };
