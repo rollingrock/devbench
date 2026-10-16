@@ -11,8 +11,11 @@ with the Skyrim build. See [MULTIGAME.md](MULTIGAME.md) for how the two fit toge
 > **Status: runs on Fallout 4 VR; flat Fallout 4 not yet run.** On FO4VR the server starts,
 > the bridge keeps one session across game restarts, and `console`, `menu`, `inspect`,
 > `nodes` and `memory` have answered live requests. Two mods, True Scopes and FRIK, register
-> their own tools through the C-ABI. `rendertarget`, `measure` and `log` have no recorded
-> live run yet. Flat Fallout 4 uses the same DLL but has never been loaded.
+> their own tools through the C-ABI. `rendertarget` `list`/`stats`/`dump` ran live on
+> FO4VR 1.2.72 (2026-10-15) — the renderer offsets hold — but twice the game hung for good
+> about a second after a readback; see the known issue under `rendertarget` below. `measure`
+> and `log` have no recorded live run yet. Flat Fallout 4 uses the same DLL but has never
+> been loaded.
 
 ## Install
 
@@ -104,6 +107,18 @@ work identically on any platform that fills the relevant seam.
 A screenshot shows the final image. This shows the buffers that **produced** it — the
 G-buffer, the light accumulation, the shadow map — which is where a rendering bug actually
 lives.
+
+> **Known issue — readback can hang FO4VR (open, 2026-10-15).** In two null-driver sessions
+> on FO4VR 1.2.72 the main thread stopped for good within ~1 s of a `stats`/`dump`. The stuck
+> stack was the game's OpenVR submit: `vrclient_x64` → `ID3D11DeviceContext::Flush` →
+> `NDXGI::CDevice::FlushAndEnqueueSetEvent` → driver → `WaitForSingleObject`; no TDR,
+> vrcompositor alive. Three runs without readbacks were clean; a mod's own scope render was
+> active in both hangs, so it is not yet pinned on devbench. What the readback does: one F4SE
+> main-thread task runs `CopySubresourceRegion` into a staging texture on the engine's
+> immediate context, then a **blocking** `Map(READ)`; it takes no `ID3D11Multithread` lock.
+> The open question is whether the thread F4SE runs tasks on is the thread that drives that
+> context. Until that is answered, do not call `stats`/`dump` in unattended VR sessions.
+> `list` reads descriptors only and has not been implicated.
 
 ```powershell
 $rt = "http://127.0.0.1:8930/api/tool/rendertarget"
@@ -268,7 +283,9 @@ The console's history shows the command line above its output, as when typed.
   _names_ are not reported: Fallout addresses targets by logical id through
   RenderTargetManager's remap table, a different index space from the physical slots
   enumerated here, and printing a name that might belong to a different buffer is worse
-  than printing none.
+  than printing none. On FO4VR 1.2.72 the remap is `physical = [rtm + 0x13BC + id*4]`
+  (u32), e.g. logical 0x61 → 93, 0x62 → 94, 4 → 6 — measured by the True Scopes
+  investigation, not yet used by `rendertarget`, which still takes the physical index.
 - **`record` / `replay` / `scenario` / `capture` / `game` / `papyrus`** are Skyrim-only
   so far. They are mostly pure logic around a few engine calls (`Recording.cpp` is 1014
   lines with 11 game references), so porting them is bounded work, not a rewrite.

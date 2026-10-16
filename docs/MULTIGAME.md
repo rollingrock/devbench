@@ -247,12 +247,15 @@ that claims less:
 - ✅ **Fallout `console` returns its output.** It runs the command and reads
   `ConsoleLog`'s buffer in one main-thread task, with no fencing; see
   [FALLOUT4.md](FALLOUT4.md).
-- ⚠️ **The renderer struct offsets have not been confirmed against a running game.** They
-  agree from two independent directions (CommonLibF4's flat-rim layout, and a live
-  x64dbg measurement on VR — `0x10 + 0x0A58 + 0x10 == 0xA78` exactly), and
-  `Device_Fallout4.cpp` validates the device, the context and a sample of the target
-  array before publishing anything, returning null rather than a plausible wrong
-  pointer. But agreement is not the same as a live `rendertarget action='list'`.
+- ✅ **The renderer struct offsets hold on Fallout 4 VR 1.2.72.** `rendertarget`
+  `list`/`stats`/`dump` ran live on 2026-10-15 (True Scopes' rig): a dump of physical slot
+  94 decoded as R11G11B10 into a finite, sensible image. Flat-rim is still unconfirmed.
+- ⚠️ **…but a readback may hang FO4VR.** Twice the main thread stopped for good ~1 s after
+  a `stats`/`dump`, stuck in the OpenVR submit's `ID3D11DeviceContext::Flush`; not yet
+  pinned on devbench (another mod's render was active both times). The readback runs a
+  copy and a blocking `Map` on the engine's immediate context from an F4SE task, with no
+  `ID3D11Multithread` lock. Open until it is known whether that task thread is the one
+  that drives the context. Details in [FALLOUT4.md](FALLOUT4.md).
 
 ## 6. Suggested review order
 
