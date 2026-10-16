@@ -823,6 +823,7 @@ namespace dvb::Capture
 							} },
 			{ "required", json::array({ "checkpointId" }) },
 		};
+		ToolExtensions::MergeExtensionArgs(d.name, d.inputSchema);  // a provider gets the full args
 		return d;
 	}
 

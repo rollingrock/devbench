@@ -37,4 +37,21 @@ namespace dvb::ToolExtensions
 
 	/// Sorted display keys registered under `baseTool`. Thread-safe.
 	std::vector<std::string> Keys(std::string_view a_baseTool);
+
+	/// Make a base tool's inputSchema accept the arguments its registered extensions read. Call it
+	/// wherever the base tool's descriptor is built or rebuilt (the ChangeListener path).
+	///
+	/// The base tool hands an extension the FULL args object, so an argument only the extension
+	/// reads is a correct argument — but ToolRegistry::Invoke checks request keys against the base
+	/// schema alone, so it warned on it (and, under strictToolArgs, refused it with a 400 the
+	/// extension never saw).
+	///
+	/// An extension declares its arguments the way a tool does, as `inputSchema.properties` in its
+	/// descriptor. Those are added to the base tool's properties — tagged with the extension key,
+	/// and never replacing a key the base tool declares itself — which also puts them in tools/list.
+	/// If ANY extension under the base declares none, its arguments are unknowable, so the schema
+	/// gains `additionalProperties: true` and the registry stops checking that base tool: a warning
+	/// about an argument the handler actually reads is a false report, which is worse than none.
+	/// A no-op when the base schema enumerates no keys of its own (nothing is checked anyway).
+	void MergeExtensionArgs(std::string_view a_baseTool, json& a_inputSchema);
 }

@@ -2998,6 +2998,7 @@ namespace dvb
 									{ "limit", json{ { "type", "integer" }, { "description", "refs/inventory/lights: max entries to return (default 100; lights: lights emitted, 0..50000)" } } },
 								} },
 			};
+			ToolExtensions::MergeExtensionArgs(inspect.name, inspect.inputSchema);  // kind=<mod key> gets the full args
 			return inspect;
 		}
 
@@ -3028,6 +3029,7 @@ namespace dvb
 									{ "index", json{ { "type", "integer" }, { "description", "accept: 0-based button index to select (default 0). See describe's buttons/cancelIndex." } } },
 								} },
 			};
+			ToolExtensions::MergeExtensionArgs(menu.name, menu.inputSchema);  // invoke name=<mod menu> gets the full args
 			return menu;
 		}
 	}

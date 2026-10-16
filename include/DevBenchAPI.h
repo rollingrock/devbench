@@ -107,6 +107,12 @@ namespace DevBenchAPI
 		// `inspect kind=extensions`). Opted-in base tools: `menu`, `inspect`. Returns false if it
 		// replaced an existing (baseTool, key) entry.
 		//
+		// Declare the arguments your handler reads beyond the base tool's own as
+		// "inputSchema": { "type": "object", "properties": { … } } — the same shape RegisterTool
+		// takes. devbench folds them into the base tool's schema, so they appear in tools/list and
+		// pass its unknown-argument check. Without one, devbench cannot know your arguments and
+		// stops checking that base tool's argument names while you are registered.
+		//
 		// ABI: appended after RegisterMenuHandler — call only when GetBuildNumber() >= 10500
 		// (devbench 1.5.0).
 		virtual bool RegisterToolExtension(const char* a_baseTool, const char* a_key,

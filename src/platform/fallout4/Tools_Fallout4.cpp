@@ -395,6 +395,7 @@ namespace dvb
 				{ "properties", json{
 									{ "kind", json{ { "type", "string" }, { "enum", std::move(kinds) }, { "description", "default 'state'; or a registered mod kind (see kind='extensions')" } } } } }
 			};
+			ToolExtensions::MergeExtensionArgs(inspect.name, inspect.inputSchema);  // kind=<mod key> gets the full args
 			inspect.readOnly = true;
 			return inspect;
 		}
