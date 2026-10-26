@@ -125,17 +125,28 @@ lives.
 >   devbench frames on the stack.
 >
 > Both builds issue `CopySubresourceRegion` and `Map` on the engine's immediate context from
-> an F4SE task, with no `ID3D11Multithread` lock. F4SE VR runs those tasks from a detour on
-> `MessageQueueProcessTask`, so on whichever thread calls it. Two explanations remain:
+> an F4SE task, with no `ID3D11Multithread` lock. **What has been ruled out (2026-10-26,
+> measured unless marked):**
 >
-> - That thread is not the one the renderer drives the context from, so every call races it.
-> - It is, and the test build's one cross-thread call broke a single-threaded device: the
->   staging texture's final `Release`, made on devbench's HTTP thread.
+> - **A thread race.** devbench's task thread is the game's thread 0 (`list`'s
+>   `taskThreadId` matched cdb's thread 0 in the same process). Thread 0 also runs the
+>   frame loop, `DrawWorld_And_UI` (True Scopes' render hook logged the same thread) and
+>   the VR submit.
+> - **A mid-frame call.** F4SE drains its tasks in `Main::OnIdle` after `Main::Swap`
+>   returns, i.e. after the frame is drawn and submitted. This one is from a static scan of
+>   `Fallout4VR.exe`: the task-drain call at 0xD845E3 follows the `Main::Swap` call at
+>   0xD844BC.
+> - **A single-threaded device.** Creation flags are 0x0 and multithread protection is off.
+> - **A shared resource.** The target read (physical 94, 1024², `R11G11B10_FLOAT`) has bind
+>   flags 0x28 (shader resource + render target) and misc flags 0x0: no `SHARED`, no keyed
+>   mutex.
 >
-> `list` now reports `threading` to decide it: `taskThreadId` (decimal and hex),
-> `deviceCreationFlags`, `singleThreadedDevice`, and `multithreadProtected` (`null` when the
-> runtime does not say). Compare `taskThreadId` with the thread the renderer submits from.
-> `list` reads descriptors only and has not been implicated.
+> So no rule of D3D11 is known to be broken, and the cause is still open. The 0.5 s
+> includes Buffout's time writing its crash log, so the fault may have come on the first
+> poll. An instrumented build that logs every D3D step and can stop after any one of them
+> is on branch `fix/rendertarget-readback-instrumented`. It is not on `main`. `list`
+> reports these facts (`threading`, and per target `usage`, `bindFlags`, `miscFlags`,
+> `cpuAccessFlags`); it reads descriptors only and has not been implicated.
 
 ```powershell
 $rt = "http://127.0.0.1:8930/api/tool/rendertarget"
@@ -285,7 +296,10 @@ Three engine facts it is built around, worth not rediscovering:
   hung FO4VR for good (2026-10-26, pid 42092; earlier loads just took longer than the 5 s
   task timeout). So `load`, `coc`/`CenterOnCell`, `cow`/`CenterOnWorld` and
   `qqq`/`QuitGame` are always queued, even with `capture=true`. The reply says so
-  (`queued: true` and a note). Wait for the load yourself afterwards.
+  (`queued: true` and a note). Wait for the load yourself afterwards. Checked live on
+  FO4VR (20b3555, 2026-10-26, FRIK's rig): a main-menu `load`, an in-game `coc` and an
+  in-game reload each replied within 0.02 s, queued, and the game loaded and kept
+  running; ordinary commands are still captured.
 - **The Console menu drains `ConsoleLog::buffer`.** Every print appends to that buffer.
   Before the Console menu has ever been opened, the buffer keeps everything printed since
   load. After that, the menu empties it into its history on the next UI pass. That pass

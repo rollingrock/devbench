@@ -257,10 +257,11 @@ that claims less:
     (2026-10-15). It was stuck in the OpenVR submit's `ID3D11DeviceContext::Flush`.
   - A non-blocking test build crashed the NVIDIA driver on its first call (2026-10-26).
   - Both issue a copy and a `Map` on the engine's immediate context from an F4SE task.
-    Still open: whether that task thread is the one the renderer drives the context from,
-    or whether the test build's off-thread `Release` of its staging texture was the fault.
-  - `list` reports `threading` (task thread id, device creation flags, multithread
-    protection) to decide it. Details in [FALLOUT4.md](FALLOUT4.md).
+    Measured since: that task runs on thread 0, which also draws the world and submits to
+    VR. F4SE drains it after the frame is submitted, the device is free-threaded, and the
+    target is a plain render target (not shared). No D3D11 rule is known to be broken.
+    The cause is open; an instrumented branch logs every step to find it. Details in
+    [FALLOUT4.md](FALLOUT4.md).
 
 ## 6. Suggested review order
 
