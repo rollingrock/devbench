@@ -77,6 +77,13 @@ namespace dvb::tools
 				{ "arraySize", desc.ArraySize },
 				{ "mipLevels", desc.MipLevels },
 				{ "sampleCount", desc.SampleDesc.Count },
+				// How the engine created it. Not decoration: a copy out of a SHARED /
+				// KEYEDMUTEX resource without its sync is a driver-side fault, and the
+				// flags are the only way to know from outside which kind a target is.
+				{ "usage", desc.Usage },
+				{ "bindFlags", std::format("0x{:X}", desc.BindFlags) },
+				{ "miscFlags", std::format("0x{:X}", desc.MiscFlags) },
+				{ "cpuAccessFlags", std::format("0x{:X}", desc.CPUAccessFlags) },
 				// Say up front whether this one can be dumped at all, so a caller does
 				// not have to discover it by getting an error per target.
 				{ "decodable", gfx::IsSupported(desc.Format) },
@@ -211,7 +218,8 @@ namespace dvb::tools
 				"Look INSIDE the renderer: list the engine's render targets — the G-buffer, the light "
 				"accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. "
 				"action='list' → every live target as { index, width, height, format, formatName, "
-				"arraySize, sampleCount, decodable }, plus 'threading' { taskThreadId, "
+				"arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, "
+				"decodable }, plus 'threading' { taskThreadId, "
 				"taskThreadIdHex, deviceCreationFlags, singleThreadedDevice, multithreadProtected }: "
 				"which thread devbench's main-thread tasks run on and whether the D3D11 device "
 				"serialises calls from other threads (multithreadProtected null = not reported by "
