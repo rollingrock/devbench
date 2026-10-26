@@ -28,6 +28,8 @@ const FAMILIES = {
       "scenario",
       "inspect",
       "game",
+      "actor",
+      "forms",
       "camera",
       "papyrus",
       "capture",

@@ -78,6 +78,11 @@ namespace
 		}
 
 		dvb::tools::SetAllowMemoryWrites(cfg.allowMemoryWrites);
+		// alwaysActive is a shared key (Skyrim forces [General] bAlwaysActive on at
+		// kDataLoaded) that this platform does not implement yet. Say so, rather than
+		// accept the key and quietly do nothing with it.
+		if (cfg.alwaysActive)
+			logs::warn("devbench: alwaysActive is not implemented on Fallout 4 yet; ignored");
 
 		g_server = new dvb::Server("127.0.0.1", cfg.port);
 		g_server->Events().SetFrameProvider(&dvb::game::CurrentFrame);

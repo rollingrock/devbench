@@ -1,4 +1,6 @@
+#include "ActorIdle.h"
 #include "Autorun.h"
+#include "BackgroundRun.h"
 #include "CameraOrbit.h"
 #include "Capture.h"
 #include "ConsoleHook.h"
@@ -80,6 +82,8 @@ namespace
 			return;
 		if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame || a_msg->type == SKSE::MessagingInterface::kNewGame)
 			dvb::CameraOrbit::EndSession();  // an orbit never carries into another game
+		if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame || a_msg->type == SKSE::MessagingInterface::kNewGame)
+			dvb::ActorIdle::EndSession();  // nor does an idle loop
 		if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame)
 			dvb::FreeCamera::BeginLoad();
 		else if (a_msg->type == SKSE::MessagingInterface::kNewGame || a_msg->type == SKSE::MessagingInterface::kPostLoadGame)
@@ -168,6 +172,12 @@ namespace
 		// is inert if its framework isn't installed; both drive devbench via dvb::RunTool, so they
 		// need the server (g_server). SMF and FUCK are independent — host either, both, or neither.
 		if (a_msg->type == SKSE::MessagingInterface::kDataLoaded && g_server) {
+			if (g_config.alwaysActive) {
+				if (dvb::BackgroundRun::SetAlwaysActive(true))
+					logs::info("devbench: bAlwaysActive forced on (alwaysActive config)");
+				else
+					logs::warn("devbench: alwaysActive requested but bAlwaysActive:General is unavailable");
+			}
 			dvb::UI::Register();
 			dvb::UI::RegisterFuck();
 		}
