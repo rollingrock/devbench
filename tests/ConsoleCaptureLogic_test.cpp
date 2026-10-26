@@ -594,3 +594,28 @@ TEST_CASE("a console line splits on semicolons outside quotes")
 	CHECK(SplitConsoleCommands(" ; ").empty());
 	CHECK(SplitConsoleCommands("help").size() == 1);
 }
+
+TEST_CASE("commands that leave the world are recognised by their verb, any case")
+{
+	using dvb::ConsoleLogCapture::WorldLeavingVerb;
+	CHECK(WorldLeavingVerb("load phase4c7rev") == "load");
+	CHECK(WorldLeavingVerb("  LOAD  \"my save\"") == "load");
+	CHECK(WorldLeavingVerb("coc QASmoke") == "coc");
+	CHECK(WorldLeavingVerb("CenterOnCell QASmoke") == "centeroncell");
+	CHECK(WorldLeavingVerb("cow Commonwealth 0 0") == "cow");
+	CHECK(WorldLeavingVerb("CenterOnWorld Commonwealth 0 0") == "centeronworld");
+	CHECK(WorldLeavingVerb("qqq") == "qqq");
+	CHECK(WorldLeavingVerb("QuitGame") == "quitgame");
+}
+
+TEST_CASE("other commands, and verbs that only start like one, run inline")
+{
+	using dvb::ConsoleLogCapture::WorldLeavingVerb;
+	CHECK(WorldLeavingVerb("player.getpos x").empty());
+	CHECK(WorldLeavingVerb("save quick").empty());
+	CHECK(WorldLeavingVerb("loadgame x").empty());    // not a Fallout 4 verb; compared whole
+	CHECK(WorldLeavingVerb("cocktail").empty());      // whole token, not a prefix
+	CHECK(WorldLeavingVerb("player.coc x").empty());  // the verb is the first token
+	CHECK(WorldLeavingVerb("").empty());
+	CHECK(WorldLeavingVerb("   ").empty());
+}

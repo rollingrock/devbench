@@ -245,6 +245,27 @@ namespace dvb::ConsoleLogCapture
 		return out;
 	}
 
+	std::string WorldLeavingVerb(std::string_view a_command)
+	{
+		// Fallout 4's names and short forms for: load a save, centre on a cell or a
+		// worldspace position (both run a load screen), and quit.
+		static constexpr std::string_view kVerbs[] = {
+			"load", "coc", "centeroncell", "cow", "centeronworld", "qqq", "quitgame"
+		};
+		const auto first = a_command.find_first_not_of(" \t");
+		if (first == std::string_view::npos)
+			return {};
+		const auto  end = a_command.find_first_of(" \t", first);
+		std::string verb(a_command.substr(first, end == std::string_view::npos ? std::string_view::npos : end - first));
+		for (auto& c : verb)
+			c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+		for (const auto v : kVerbs) {
+			if (verb == v)
+				return verb;
+		}
+		return {};
+	}
+
 	std::string EscapeInvalidUtf8(std::string_view a_text)
 	{
 		static constexpr char kHex[] = "0123456789ABCDEF";

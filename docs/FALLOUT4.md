@@ -280,6 +280,12 @@ Three engine facts it is built around, worth not rediscovering:
   (`Script::CompileAndRun` with the console's compiler, against the selected reference)
   and reads the buffer before and after in the same task. `capture=false` keeps the
   queued path, which also handles a `ForEachRef[...]` block.
+- **A command that leaves the world must not run inside a task.** Run that way, an in-game
+  `load` entered the engine's nested load-screen wait from inside F4SE's task drain and
+  hung FO4VR for good (2026-10-26, pid 42092; earlier loads just took longer than the 5 s
+  task timeout). So `load`, `coc`/`CenterOnCell`, `cow`/`CenterOnWorld` and
+  `qqq`/`QuitGame` are always queued, even with `capture=true`. The reply says so
+  (`queued: true` and a note). Wait for the load yourself afterwards.
 - **The Console menu drains `ConsoleLog::buffer`.** Every print appends to that buffer.
   Before the Console menu has ever been opened, the buffer keeps everything printed since
   load. After that, the menu empties it into its history on the next UI pass. That pass

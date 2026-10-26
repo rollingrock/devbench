@@ -89,6 +89,18 @@ namespace dvb::ConsoleLogCapture
 	/// each trimmed, empty ones dropped.
 	std::vector<std::string> SplitConsoleCommands(std::string_view a_line);
 
+	/// The verb (lower-case) of a console command that leaves the current world: it loads a
+	/// save, moves the player to another cell, or quits. Empty for any other command.
+	///
+	/// Such a command must go through the console's own queue, so the engine runs it at its
+	/// normal point in a later frame. It must never run inline inside a devbench main-thread
+	/// task. Run inline, an in-game `load` entered the engine's nested load-screen wait from
+	/// inside F4SE's task drain and hung FO4VR for good (2026-10-26). Its output is
+	/// meaningless to capture anyway: the world it would describe is about to go.
+	///
+	/// The verb is the command's first token, compared without regard to case.
+	std::string WorldLeavingVerb(std::string_view a_command);
+
 	/// a_text with every byte that is not part of a well-formed UTF-8 sequence written as \xNN.
 	/// The JSON serialiser throws on invalid UTF-8, and the game's text is not guaranteed to be.
 	std::string EscapeInvalidUtf8(std::string_view a_text);

@@ -504,8 +504,19 @@ namespace dvb
 			// state-machine command (coc, ...) silently no-op without printing anything.
 			const bool blocked = IsMessageBoxOpen();
 
+			// A command that leaves the world (load, coc, ...) is never run inline, even when its
+			// output was asked for. ConsoleLogCapture::WorldLeavingVerb says why: run inline, an
+			// in-game `load` hung FO4VR for good.
+			std::string leaving;
+			if (capture) {
+				for (const auto& one : ConsoleLogCapture::SplitConsoleCommands(command)) {
+					if (leaving = ConsoleLogCapture::WorldLeavingVerb(one); !leaving.empty())
+						break;
+				}
+			}
+
 			json out;
-			if (!capture) {
+			if (!capture || !leaving.empty()) {
 				MainThread::RunAndWait([command]() -> json {
 					RE::Console::ExecuteCommand(command.c_str());
 					return true;
@@ -514,7 +525,13 @@ namespace dvb
 					{ "executed", true },
 					{ "command", command },
 					{ "captured", false },
-					{ "note", "capture=false: queued exactly as if typed, so it runs on a later frame and its output goes to the in-game console" },
+					{ "queued", true },
+					{ "note", leaving.empty() ?
+								  std::string("capture=false: queued exactly as if typed, so it runs on a later frame and its output goes to the in-game console") :
+								  std::format("'{}' leaves the current world, so it was queued exactly as if typed and runs on a later frame, "
+											  "even with capture=true; its output was not captured. Run inline inside devbench's task, an "
+											  "in-game load can hang the game for good.",
+									  leaving) },
 				};
 			} else {
 				// The console runs a ForEachRef[...] block itself, before any script sees it.
@@ -778,7 +795,7 @@ namespace dvb
 			console.name = "console";
 			console.description =
 				"Run a Fallout 4 console command and return what it printed: { executed, command, "
-				"compiled, captured, count, lines, blocked }. By default (capture=true) the command is "
+				"compiled, captured, count, lines, blocked, queued }. By default (capture=true) the command is "
 				"compiled and run right away on the main thread, against the console's selected "
 				"reference, and its output is read from the engine's console buffer in that same task, "
 				"so `lines` holds this command's output only, complete even when it prints many lines "
@@ -792,7 +809,10 @@ namespace dvb
 				"how to clear it). Several commands separated by ';' run in order, as in the console; "
 				"`compiled` is false if any did not compile. A ForEachRef[...] block needs capture=false, "
 				"which queues the line exactly as if typed; it then runs on a later frame and returns no "
-				"output. `blocked` is true if a "
+				"output (queued=true). A line with a command that leaves the current world (load, "
+				"coc/CenterOnCell, cow/CenterOnWorld, qqq/QuitGame) is always queued that way, even with "
+				"capture=true, and the note says so: run inline, an in-game load can hang the game for "
+				"good. Wait for the load yourself afterwards. `blocked` is true if a "
 				"modal (MessageBoxMenu) was open at submission time — many state-machine commands (coc, "
 				"...) silently no-op behind one rather than erroring; see `menu` to describe/dismiss it. "
 				"Non-UTF-8 bytes come back escaped as \\xNN.";
