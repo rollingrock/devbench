@@ -1,19 +1,17 @@
 #include "core/tools/GfxTools.h"
 
 #include "core/GameState.h"
-#include "core/Host.h"
 #include "core/Json.h"
 #include "core/Log.h"
 #include "core/MainThread.h"
 #include "core/ToolRegistry.h"
-#include "core/gfx/Capture.h"
 #include "core/gfx/Device.h"
 #include "core/gfx/Format.h"
 
 #include <d3d11.h>
+#include <d3d11_4.h>  // ID3D11Multithread
 
 #include <algorithm>
-#include <atomic>
 #include <chrono>
 #include <format>
 #include <string>
@@ -23,7 +21,48 @@ namespace dvb::tools
 {
 	namespace
 	{
-		std::atomic<std::uint64_t> g_dumpSeq{ 0 };
+		// Why stats/dump refuse. A readback is a CopySubresourceRegion + Map on the game's
+		// immediate context, issued from a devbench main-thread task. On Fallout 4 VR that
+		// hung the game twice (blocking Map, 2026-10-15) and then crashed the NVIDIA driver
+		// on the first call (non-blocking Map, 2026-10-26) - True Scopes register TS-031.
+		// What is not known is which rule it broke: either those tasks do not run on the
+		// thread the renderer drives the context from (every call races it), or they do and
+		// the staging texture's final Release on the listener thread was the one
+		// cross-thread call, fatal on a single-threaded device. list's `threading` reports
+		// the facts that decide it. Until then the safe answer is no answer.
+		constexpr const char* kReadbackDisabled =
+			"rendertarget: action='stats' and 'dump' are disabled. A readback issues D3D11 copy/map calls on the game's "
+			"immediate context from a devbench main-thread task, and on Fallout 4 VR that hung the game twice and then "
+			"crashed the GPU driver (TS-031). They return once readback runs where the renderer allows it. "
+			"action='list' is unaffected, and its 'threading' field reports what decides the fix.";
+
+		// What decides whether a D3D call from a main-thread task is safe: the thread those
+		// tasks run on (compare it with the thread the renderer submits from), and whether
+		// the device serialises calls made from any other thread. Read, never changed.
+		json ThreadingJson(ID3D11Device* a_device)
+		{
+			const DWORD tid = ::GetCurrentThreadId();
+			const UINT  flags = a_device->GetCreationFlags();
+			json        out{
+                // Decimal and hex, because a log line ("runs on thread 56820") and cdb ("~")
+                // print it differently, and the point is to compare the two.
+                { "taskThreadId", tid },
+                { "taskThreadIdHex", std::format("0x{:X}", tid) },
+                { "deviceCreationFlags", std::format("0x{:X}", flags) },
+                { "singleThreadedDevice", (flags & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 },
+			};
+			// null, not false, when the runtime does not offer the interface: unknown is
+			// a different answer from "off".
+			out["multithreadProtected"] = nullptr;
+			if (auto* ctx = gfx::Context()) {
+				ID3D11Multithread* mt = nullptr;
+				if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11Multithread), reinterpret_cast<void**>(&mt))) && mt) {
+					out["multithreadProtected"] = mt->GetMultithreadProtected() != FALSE;
+					mt->Release();
+				}
+			}
+			return out;
+		}
 
 		json DescribeTarget(const gfx::TargetRef& a_ref)
 		{
@@ -47,101 +86,30 @@ namespace dvb::tools
 			return row;
 		}
 
-		gfx::TargetRef FindTarget(std::uint32_t a_index)
-		{
-			for (const auto& t : gfx::EnumerateTargets()) {
-				if (t.index == a_index)
-					return t;
-			}
-			return {};
-		}
-
-		json StatsJson(const gfx::Stats& a_st)
-		{
-			return json{
-				{ "pixels", a_st.pixels },
-				// nonFinitePct is listed first deliberately — it is the number that
-				// gets overlooked, and a NaN buffer displays black while reading
-				// "bright" to any exponent test. darkPct EXCLUDES non-finite pixels,
-				// so the two never quietly absorb each other.
-				{ "nonFinitePct", a_st.nonFinitePct },
-				{ "darkPct", a_st.darkPct },
-				{ "meanLuma", a_st.meanLuma },
-				{ "maxChannel", a_st.maxChannel },
-			};
-		}
-
 		json RenderTargetHandler(const json& a_args, const ToolContext&)
 		{
 			const std::string action = a_args.value("action", std::string("list"));
 
 			if (action == "list") {
-				// Everything here is a D3D call, so it belongs on the main thread even
-				// though it only reads descriptors.
+				// A main-thread task like every engine read. It reads only resource
+				// descriptors (GetDesc) and the device's creation flags, never the
+				// immediate context, which is why it is safe where a readback is not.
 				return MainThread::RunAndWait([]() -> json {
-					if (!gfx::Device())
+					auto* const device = gfx::Device();
+					if (!device)
 						throw ToolError(503, "the renderer is not available yet (or could not be resolved on this runtime)");
 					json rows = json::array();
 					for (const auto& t : gfx::EnumerateTargets())
 						rows.push_back(DescribeTarget(t));
-					return json{ { "count", rows.size() }, { "targets", std::move(rows) } };
+					return json{ { "count", rows.size() }, { "targets", std::move(rows) }, { "threading", ThreadingJson(device) } };
 				});
 			}
 
-			if (action != "stats" && action != "dump")
-				throw ToolError(400, "rendertarget: unknown action '" + action + "' (list|stats|dump)");
+			// 501 and not 400: the action exists and is documented, it is switched off.
+			if (action == "stats" || action == "dump")
+				throw ToolError(501, kReadbackDisabled);
 
-			if (!a_args.contains("index"))
-				throw ToolError(400, "rendertarget: 'index' is required (see action='list')");
-			const auto index = a_args["index"].get<std::uint32_t>();
-
-			// 0 = full resolution. The default trades a little detail for a capture
-			// that returns promptly and produces a file you can open, rather than a
-			// 25 MB bitmap of a 4K buffer.
-			const auto        maxDim = a_args.value("maxDimension", 1024u);
-			const bool        wantFile = (action == "dump");
-			const std::string label = a_args.value("label", std::string{});
-
-			// One main-thread task does the copy, the analysis and the file write.
-			// Splitting them would let the engine recreate the target between steps.
-			return MainThread::RunAndWait(
-				[index, maxDim, wantFile, label]() -> json {
-					if (!gfx::Device())
-						throw ToolError(503, "the renderer is not available yet");
-
-					const auto target = FindTarget(index);
-					if (!target.texture)
-						throw ToolError(404, std::format("no render target with index {} (see action='list')", index));
-
-					const json desc = DescribeTarget(target);
-
-					std::string err;
-					const auto  surface = gfx::Readback(target.texture, maxDim, err);
-					if (!surface.Valid())
-						throw ToolError(422, "rendertarget: " + err);
-
-					json out{
-						{ "index", index },
-						{ "source", desc },
-						{ "captured", json{ { "width", surface.width }, { "height", surface.height } } },
-						{ "stats", StatsJson(gfx::Analyse(surface)) },
-					};
-
-					if (wantFile) {
-						const auto seq = g_dumpSeq.fetch_add(1) + 1;
-						const auto name = label.empty() ?
-						                      std::format("rt{:03}_{:04}.bmp", index, seq) :
-						                      std::format("rt{:03}_{:04}_{}.bmp", index, seq, label);
-						const auto path = host::DataDir() / "captures" / name;
-						if (!gfx::WriteBMP(path, surface, err))
-							throw ToolError(500, "rendertarget: " + err);
-						out["file"] = path.string();
-					}
-					return out;
-				},
-				// A full-surface readback stalls on the GPU; the default 5 s task
-				// timeout is not always enough for a large target on a busy frame.
-				std::chrono::milliseconds(15000));
+			throw ToolError(400, "rendertarget: unknown action '" + action + "' (list|stats|dump)");
 		}
 
 		// ---------------------------------------------------------------- measure
@@ -240,30 +208,24 @@ namespace dvb::tools
 			ToolDescriptor rt;
 			rt.name = "rendertarget";
 			rt.description =
-				"Look INSIDE the renderer: list the engine's render targets, measure one, or dump it "
-				"to an image. This is what a screenshot cannot give you — the G-buffer, the light "
+				"Look INSIDE the renderer: list the engine's render targets — the G-buffer, the light "
 				"accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. "
 				"action='list' → every live target as { index, width, height, format, formatName, "
-				"arraySize, sampleCount, decodable }. action='stats' → copies target 'index' back to "
-				"the CPU and returns { nonFinitePct, darkPct, meanLuma, maxChannel } WITHOUT writing "
-				"a file. action='dump' → the same plus a 24-bit BMP under "
-				"Data/<extender>/Plugins/devbench/captures (optional 'label' in the filename). "
-				"'maxDimension' (default 1024, 0 = native) integer-downsamples so a 4K buffer stays "
-				"openable; sampling is nearest-neighbour, not averaged, because averaging hides the "
-				"single-pixel artefact you are hunting. "
-				"HDR is Reinhard-tone-mapped, and NaN/Inf pixels are painted MAGENTA rather than "
-				"clamped — clamping makes a NaN-filled buffer indistinguishable from a legitimately "
-				"overbright one. Read nonFinitePct before darkPct: NaN displays black but reads as "
-				"BRIGHT to any exponent test, so 'darkPct: 0' alone has historically meant 'not "
-				"measuring the problem'. Runs on the main thread and stalls a frame — an instrument, "
-				"not something to poll.";
+				"arraySize, sampleCount, decodable }, plus 'threading' { taskThreadId, "
+				"taskThreadIdHex, deviceCreationFlags, singleThreadedDevice, multithreadProtected }: "
+				"which thread devbench's main-thread tasks run on and whether the D3D11 device "
+				"serialises calls from other threads (multithreadProtected null = not reported by "
+				"the runtime). action='stats' and action='dump' (CPU readback, BMP dump) are "
+				"currently DISABLED and answer 501: on Fallout 4 VR a readback hung the game twice "
+				"and then crashed the GPU driver, and they stay off until readback runs where the "
+				"renderer allows it.";
 			rt.inputSchema = json{
 				{ "type", "object" },
 				{ "properties", json{
-									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "stats", "dump" }) }, { "description", "default 'list'" } } },
-									{ "index", json{ { "type", "integer" }, { "description", "engine render-target index, from action='list'" } } },
-									{ "maxDimension", json{ { "type", "integer" }, { "description", "downsample so the longest side fits; default 1024, 0 = native" } } },
-									{ "label", json{ { "type", "string" }, { "description", "dump: appended to the filename" } } } } }
+									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "stats", "dump" }) }, { "description", "default 'list'; 'stats' and 'dump' are disabled (501)" } } },
+									{ "index", json{ { "type", "integer" }, { "description", "stats/dump (disabled): engine render-target index, from action='list'" } } },
+									{ "maxDimension", json{ { "type", "integer" }, { "description", "stats/dump (disabled): downsample so the longest side fits; default 1024, 0 = native" } } },
+									{ "label", json{ { "type", "string" }, { "description", "dump (disabled): appended to the filename" } } } } }
 			};
 			a_registry.Register(std::move(rt), &RenderTargetHandler);
 		}

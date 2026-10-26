@@ -17,10 +17,15 @@ struct ID3D11Texture2D;
 // "the renderer owns N textures" is true everywhere. TargetName() is the optional
 // escape hatch for a game that does know its own names.
 //
-// THREADING: the D3D11 immediate context is not thread-safe and the engine drives it
-// from the main thread. Everything in Capture.h therefore has to be called from a
-// main-thread task (MainThread::RunAndWait), never from the server's listener
-// thread. The tools do this; anything new must too.
+// THREADING: the D3D11 immediate context is not thread-safe, and it belongs to whichever
+// thread the renderer drives it from. A MainThread::RunAndWait task is NOT known to be
+// that thread. This header once said the engine drives the context "from the main
+// thread"; on Fallout 4 VR, readbacks from main-thread tasks hung the game twice and then
+// crashed the driver (True Scopes TS-031). Whether the task thread is the render thread
+// is still unmeasured: rendertarget action='list' reports `threading` to settle it.
+// So nothing that touches the context (Capture.h) may run until a platform can put it
+// on a thread the renderer allows. Descriptor reads (GetDesc) and device queries are
+// free-threaded and fine. Nothing D3D runs on the server's listener thread, ever.
 
 namespace dvb::gfx
 {

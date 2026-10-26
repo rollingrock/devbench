@@ -15,7 +15,9 @@ struct ID3D11Texture2D;
 // G-buffer, the light accumulation, the shadow map — which is where a rendering
 // bug actually lives.
 //
-// THREADING: call from a main-thread task only. See Device.h.
+// THREADING: see Device.h. Readback() touches the immediate context and has no caller
+// today: no thread devbench can run on is yet known to be safe for it. Analyse() and
+// WriteBMP() are CPU-only.
 
 namespace dvb::gfx
 {
