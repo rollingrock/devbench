@@ -1,8 +1,8 @@
 # One devbench, several games
 
-_Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.28.0.
+_Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.32.0.
 Both targets build — Fallout 4 (CMake) and Skyrim (xmake) — and the host-independent
-unit tests pass. Written 2026-08-15; status updated 2026-10-16._
+unit tests pass. Written 2026-08-15; status updated 2026-10-26._
 
 This is the working note behind the split, and the thing to read before reviewing the
 branch. It answers three questions in order: **why a fork and not a port**, **where the
@@ -236,9 +236,9 @@ that claims less:
   mods register tools through the C-ABI; [FALLOUT4.md](FALLOUT4.md) lists what has been
   confirmed. Flat Fallout 4 has not been loaded yet.
 - ✅ **The Skyrim xmake target builds after the move** (VS 2026, `releasedbg`, re-checked
-  2026-10-16 after the upstream 1.28.0 merge), and `devbench-tests` passes — 236 cases,
-  including the core files the merge added. Building is not running: this branch's Skyrim
-  DLL has not been loaded in Skyrim since that merge.
+  2026-10-26 after the upstream 1.32.0 merge), and `devbench-tests` passes — 336 cases,
+  including the core files the merges added. Building is not running: this branch's Skyrim
+  DLL has not been loaded in Skyrim since the 1.28.0 merge.
 - ⚠️ **`game::CurrentFrame()` on Fallout 4 VR** reads `BSGraphics::State::frameCount` at a
   measured image offset, because the VR address library does not cover that id. It is
   plausibility-gated and returns `-1` rather than a garbage number when the gate fails;

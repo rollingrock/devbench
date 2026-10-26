@@ -20,7 +20,9 @@ with the Skyrim build. See [MULTIGAME.md](MULTIGAME.md) for how the two fit toge
 ## Install
 
 Drop `devbench.dll` in `Data/F4SE/Plugins/`. On first run it writes a self-documenting
-`Data/F4SE/Plugins/devbench/config.json`.
+`Data/F4SE/Plugins/devbench/config.json`. The keys are the same as Skyrim's. One of them,
+`alwaysActive`, is not implemented on Fallout yet: setting it logs a warning and does
+nothing.
 
 Default ports — distinct per game _and_ runtime, so Skyrim and Fallout can be up at the
 same time without either moving:
