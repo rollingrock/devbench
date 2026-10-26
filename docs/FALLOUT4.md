@@ -12,10 +12,11 @@ with the Skyrim build. See [MULTIGAME.md](MULTIGAME.md) for how the two fit toge
 > the bridge keeps one session across game restarts, and `console`, `menu`, `inspect`,
 > `nodes` and `memory` have answered live requests. Two mods, True Scopes and FRIK, register
 > their own tools through the C-ABI. `rendertarget` `list`/`stats`/`dump` ran live on
-> FO4VR 1.2.72 (2026-10-15) — the renderer offsets hold — but twice the game hung for good
-> about a second after a readback; see the known issue under `rendertarget` below. `measure`
-> and `log` have no recorded live run yet. Flat Fallout 4 uses the same DLL but has never
-> been loaded.
+> FO4VR 1.2.72 (2026-10-15) and the renderer offsets hold, but readbacks then hung the game
+> twice and crashed the GPU driver once. **`stats` and `dump` are disabled (501)** until
+> that is understood; `list` works. See the known issue under `rendertarget` below.
+> `measure` and `log` have no recorded live run yet. Flat Fallout 4 uses the same DLL but
+> has never been loaded.
 
 ## Install
 
@@ -98,7 +99,7 @@ Reachable over both MCP (`tools/call` on `/mcp`) and REST (`POST /api/tool/<name
 | `nodes`        | Walk the live scene graph: `roots`, `tree`, `find`, `get`, `geometry`. Every node carries its real class (from RTTI) and an address that pastes into `memory`. See below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `memory`       | Read / resolve / write process memory by address expression. See below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `log`          | `action='tail'` (default) returns the last N lines of a plugin log from `Documents/My Games/Fallout4[VR]/F4SE/`, optional `grep` substring; `action='list'` enumerates them. Any plugin's log, not just devbench's.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `rendertarget` | `action='list'` every render target the engine owns; `'stats'` copies one back and reports `{ nonFinitePct, darkPct, meanLuma, maxChannel }`; `'dump'` also writes a BMP. See below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `rendertarget` | `action='list'` every render target the engine owns, plus the threading facts below. `'stats'` (copy one back, report `{ nonFinitePct, darkPct, meanLuma, maxChannel }`) and `'dump'` (also write a BMP) are **disabled** and answer 501. See below.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `measure`      | Frame-time percentiles over a window: `{ fps, meanMs, minMs, p50Ms, p95Ms, p99Ms, maxMs, frames, missedTransitions }`. No engine hook.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 `memory`, `log`, `rendertarget` and `measure` are game-agnostic — they live in the core and
@@ -110,26 +111,41 @@ A screenshot shows the final image. This shows the buffers that **produced** it 
 G-buffer, the light accumulation, the shadow map — which is where a rendering bug actually
 lives.
 
-> **Known issue — readback can hang FO4VR (open, 2026-10-15).** In two null-driver sessions
-> on FO4VR 1.2.72 the main thread stopped for good within ~1 s of a `stats`/`dump`. The stuck
-> stack was the game's OpenVR submit: `vrclient_x64` → `ID3D11DeviceContext::Flush` →
-> `NDXGI::CDevice::FlushAndEnqueueSetEvent` → driver → `WaitForSingleObject`; no TDR,
-> vrcompositor alive. Three runs without readbacks were clean; a mod's own scope render was
-> active in both hangs, so it is not yet pinned on devbench. What the readback does: one F4SE
-> main-thread task runs `CopySubresourceRegion` into a staging texture on the engine's
-> immediate context, then a **blocking** `Map(READ)`; it takes no `ID3D11Multithread` lock.
-> The open question is whether the thread F4SE runs tasks on is the thread that drives that
-> context. Until that is answered, do not call `stats`/`dump` in unattended VR sessions.
+> **Known issue: readback hangs or crashes FO4VR. `stats`/`dump` are disabled until it is
+> understood (open, True Scopes register TS-031).** All runs were on FO4VR 1.2.72 with the
+> SteamVR null driver.
+>
+> - **2026-10-15, blocking readback:** twice the main thread stopped for good within ~1 s
+>   of a `stats`/`dump`, in the game's OpenVR submit (`vrclient_x64` →
+>   `ID3D11DeviceContext::Flush` → `NDXGI::CDevice::FlushAndEnqueueSetEvent` → driver →
+>   `WaitForSingleObject`; no TDR).
+> - **2026-10-26, non-blocking test build:** the copy was queued in one task, then mapped
+>   with `DO_NOT_WAIT` from later ones. The **first** `stats` crashed the game ~0.5 s in,
+>   with an access violation in `nvwgf2umx.dll` on a driver worker thread and no game or
+>   devbench frames on the stack.
+>
+> Both builds issue `CopySubresourceRegion` and `Map` on the engine's immediate context from
+> an F4SE task, with no `ID3D11Multithread` lock. F4SE VR runs those tasks from a detour on
+> `MessageQueueProcessTask`, so on whichever thread calls it. Two explanations remain:
+>
+> - That thread is not the one the renderer drives the context from, so every call races it.
+> - It is, and the test build's one cross-thread call broke a single-threaded device: the
+>   staging texture's final `Release`, made on devbench's HTTP thread.
+>
+> `list` now reports `threading` to decide it: `taskThreadId` (decimal and hex),
+> `deviceCreationFlags`, `singleThreadedDevice`, and `multithreadProtected` (`null` when the
+> runtime does not say). Compare `taskThreadId` with the thread the renderer submits from.
 > `list` reads descriptors only and has not been implicated.
 
 ```powershell
 $rt = "http://127.0.0.1:8930/api/tool/rendertarget"
 irm $rt -Method Post -ContentType application/json -Body '{"action":"list"}'
-irm $rt -Method Post -ContentType application/json -Body '{"action":"stats","index":12}'
-irm $rt -Method Post -ContentType application/json -Body '{"action":"dump","index":12,"label":"before"}'
+# disabled for now (501), see the known issue above:
+#   {"action":"stats","index":12}
+#   {"action":"dump","index":12,"label":"before"}
 ```
 
-Dumps land in `Data/F4SE/Plugins/devbench/captures`. `maxDimension` (default 1024, `0` =
+The rest of this section describes `stats`/`dump` as they behave when enabled. Dumps land in `Data/F4SE/Plugins/devbench/captures`. `maxDimension` (default 1024, `0` =
 native) integer-downsamples so a 4K buffer stays openable; sampling is nearest-neighbour,
 **not** averaged, because averaging hides the single-pixel artefact you are hunting.
 

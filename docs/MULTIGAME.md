@@ -166,6 +166,8 @@ rendertarget action='stats' index=12                -> nonFinitePct, darkPct, me
 rendertarget action='dump'  index=12 label='before' -> the same, plus a BMP on disk
 ```
 
+`stats` and `dump` are currently disabled (501) on every platform: see §5.
+
 The platform seam it sits on is three functions (`core/gfx/Device.h`): device, context,
 and "enumerate the targets the renderer owns, by engine index". Everything else —
 readback, decode, analysis, dumping — is game-agnostic. Skyrim can have this by writing
@@ -250,12 +252,15 @@ that claims less:
 - ✅ **The renderer struct offsets hold on Fallout 4 VR 1.2.72.** `rendertarget`
   `list`/`stats`/`dump` ran live on 2026-10-15 (True Scopes' rig): a dump of physical slot
   94 decoded as R11G11B10 into a finite, sensible image. Flat-rim is still unconfirmed.
-- ⚠️ **…but a readback may hang FO4VR.** Twice the main thread stopped for good ~1 s after
-  a `stats`/`dump`, stuck in the OpenVR submit's `ID3D11DeviceContext::Flush`; not yet
-  pinned on devbench (another mod's render was active both times). The readback runs a
-  copy and a blocking `Map` on the engine's immediate context from an F4SE task, with no
-  `ID3D11Multithread` lock. Open until it is known whether that task thread is the one
-  that drives the context. Details in [FALLOUT4.md](FALLOUT4.md).
+- ❌ **…but readback is not safe on FO4VR, so `stats`/`dump` are disabled (501).**
+  - A blocking readback hung the main thread for good twice, ~1 s after the call
+    (2026-10-15). It was stuck in the OpenVR submit's `ID3D11DeviceContext::Flush`.
+  - A non-blocking test build crashed the NVIDIA driver on its first call (2026-10-26).
+  - Both issue a copy and a `Map` on the engine's immediate context from an F4SE task.
+    Still open: whether that task thread is the one the renderer drives the context from,
+    or whether the test build's off-thread `Release` of its staging texture was the fault.
+  - `list` reports `threading` (task thread id, device creation flags, multithread
+    protection) to decide it. Details in [FALLOUT4.md](FALLOUT4.md).
 
 ## 6. Suggested review order
 
