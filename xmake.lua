@@ -174,6 +174,10 @@ add_files("tests/*.cpp")
 add_files("src/core/ToolRegistry.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/Ssim.cpp") -- exercised directly; pure logic, no game deps
 add_files("src/core/gfx/Format.cpp") -- the DXGI decoder + the NaN blind-spot regression
+-- The render-target readback, run against a WARP (software) D3D11 device that every Windows
+-- install has: no GPU, no game. Readback_test.cpp supplies the gfx::Device()/Context() seam.
+add_files("src/core/gfx/Capture.cpp")
+add_syslinks("d3d11")
 add_files("src/core/tools/Memory.cpp") -- SEH-guarded reads + the RTTI identity check nodes relies on
 add_files("src/core/Host.cpp", "src/core/Log.cpp") -- the platform seam, stubbed by tests/pch.h
 -- Also compiled here as an INVARIANT CHECK (beyond what HostApi_test exercises):

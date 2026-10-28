@@ -84,25 +84,30 @@
     },
     {
       "name": "rendertarget",
-      "description": "Look INSIDE the renderer: list the engine's render targets — the G-buffer, the light accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. action='list' → every live target as { index, width, height, format, formatName, arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, decodable }, plus 'threading' { taskThreadId, taskThreadIdHex, mainThreadId, tasksOffMainThread, confinedToMainThread, deviceCreationFlags, singleThreadedDevice, multithreadProtected }: which thread this task ran on against the game's main thread (mainThreadId 0 = not recorded), how many tasks have run anywhere else, whether tasks are established to stay on the main thread, and whether the D3D11 device serialises calls from other threads (multithreadProtected null = not reported by the runtime). action='stats' and action='dump' (CPU readback, BMP dump) are currently DISABLED and answer 501: on Fallout 4 VR a readback hung the game twice and then crashed the GPU driver, and they stay off until readback runs where the renderer allows it.",
+      "description": "Look INSIDE the renderer: list the engine's render targets, measure one, or dump it to an image. This is what a screenshot cannot give you — the G-buffer, the light accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. action='list' → every live target as { index, width, height, format, formatName, arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, decodable }, plus 'threading' { taskThreadId, taskThreadIdHex, mainThreadId, tasksOffMainThread, confinedToMainThread, deviceCreationFlags, singleThreadedDevice, multithreadProtected }. action='stats' → copies target 'index' back to the CPU and ",
       "inputSchema": {
         "properties": {
           "action": {
-            "description": "default 'list'; 'stats' and 'dump' are disabled (501)",
+            "description": "default 'list'",
             "enum": ["list", "stats", "dump"],
             "type": "string"
           },
           "index": {
-            "description": "stats/dump (disabled): engine render-target index, from action='list'",
+            "description": "stats/dump: engine render-target index, from action='list'",
             "type": "integer"
           },
           "label": {
-            "description": "dump (disabled): appended to the filename",
+            "description": "dump: appended to the filename",
             "type": "string"
           },
           "maxDimension": {
-            "description": "stats/dump (disabled): downsample so the longest side fits; default 1024, 0 = native",
+            "description": "stats/dump: downsample so the longest side fits; default 1024, 0 = native",
             "type": "integer"
+          },
+          "stage": {
+            "description": "stats: stop after this step, to bisect a failure; default 'map' (the whole readback)",
+            "enum": ["create", "copy", "map"],
+            "type": "string"
           }
         },
         "type": "object"

@@ -1,10 +1,12 @@
 #include "core/tools/GfxTools.h"
 
 #include "core/GameState.h"
+#include "core/Host.h"
 #include "core/Json.h"
 #include "core/Log.h"
 #include "core/MainThread.h"
 #include "core/ToolRegistry.h"
+#include "core/gfx/Capture.h"
 #include "core/gfx/Device.h"
 #include "core/gfx/Format.h"
 
@@ -12,29 +14,50 @@
 #include <d3d11_4.h>  // ID3D11Multithread
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <format>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
+
+// A readback is a CopySubresourceRegion + Map on the game's D3D11 immediate context,
+// which the renderer drives from the game's main thread. The calls are safe only from
+// that thread. True Scopes register TS-031 is what it cost to learn that: on Fallout 4 VR,
+// F4SE ran devbench's "main-thread" tasks on worker threads, and readbacks issued from
+// them hung the game twice and then crashed the NVIDIA driver. Two rules follow, and
+// both are enforced here, not just assumed:
+//   - stats/dump run only where the platform has established that tasks stay on the
+//     main thread (MainThread::ConfinedToMainThread), and refuse with 501 elsewhere;
+//   - every task that touches D3D checks its own thread first, and refuses rather than
+//     calling D3D from anywhere else.
+// Every D3D step is logged before and after the call, so if a game ever dies inside
+// one, the last line of devbench.log names it.
 
 namespace dvb::tools
 {
 	namespace
 	{
-		// Why stats/dump refuse. A readback is a CopySubresourceRegion + Map on the game's
-		// immediate context, issued from a devbench main-thread task. On Fallout 4 VR that
-		// hung the game twice (blocking Map, 2026-10-15) and then crashed the NVIDIA driver
-		// on the first call (non-blocking Map, 2026-10-26) - True Scopes register TS-031.
-		// What is not known is which rule it broke: either those tasks do not run on the
-		// thread the renderer drives the context from (every call races it), or they do and
-		// the staging texture's final Release on the listener thread was the one
-		// cross-thread call, fatal on a single-threaded device. list's `threading` reports
-		// the facts that decide it. Until then the safe answer is no answer.
-		constexpr const char* kReadbackDisabled =
-			"rendertarget: action='stats' and 'dump' are disabled. A readback issues D3D11 copy/map calls on the game's "
-			"immediate context from a devbench main-thread task, and on Fallout 4 VR that hung the game twice and then "
-			"crashed the GPU driver (TS-031). They return once readback runs where the renderer allows it. "
-			"action='list' is unaffected, and its 'threading' field reports what decides the fix.";
+		std::atomic<std::uint64_t> g_dumpSeq{ 0 };
+		std::atomic<std::uint64_t> g_readbackSeq{ 0 };
+
+		constexpr const char* kNoMainThread =
+			"rendertarget: action='stats' and 'dump' are off on this runtime. A readback must run on the game's "
+			"main thread, and devbench has not established that its tasks do here (on Fallout 4 VR, F4SE ran "
+			"them on worker threads, and a readback from one crashed the GPU driver - TS-031). action='list' "
+			"works, and its 'threading' field says what is known.";
+
+		// Inside a task, before any D3D call. The drain can be installed and a task still
+		// end up elsewhere only through a bug, and a bug here crashes a driver.
+		void RequireMainThread()
+		{
+			const auto owner = MainThread::OwnerThreadId();
+			if (owner != 0 && owner != ::GetCurrentThreadId())
+				throw ToolError(503, std::format("rendertarget: this task ran on thread {}, not the main thread {}; "
+												 "refusing to touch D3D from it",
+										 ::GetCurrentThreadId(), owner));
+		}
 
 		// What decides whether a D3D call from a main-thread task is safe: the thread those
 		// tasks run on (compare it with the thread the renderer submits from), and whether
@@ -48,8 +71,8 @@ namespace dvb::tools
                 // print it differently, and the point is to compare the two.
                 { "taskThreadId", tid },
                 { "taskThreadIdHex", std::format("0x{:X}", tid) },
-                // 0 = the platform does not record it. On FO4VR the two once differed
-                // (F4SE ran tasks on worker threads, TS-031), which is why both are here.
+                // 0 = the platform does not record it. Compare with taskThreadId: on FO4VR
+                // they were found to differ (TS-031), which is why both are reported.
                 { "mainThreadId", MainThread::OwnerThreadId() },
                 { "tasksOffMainThread", MainThread::OffThreadRuns() },
                 { "confinedToMainThread", MainThread::ConfinedToMainThread() },
@@ -98,6 +121,30 @@ namespace dvb::tools
 			return row;
 		}
 
+		gfx::TargetRef FindTarget(std::uint32_t a_index)
+		{
+			for (const auto& t : gfx::EnumerateTargets()) {
+				if (t.index == a_index)
+					return t;
+			}
+			return {};
+		}
+
+		json StatsJson(const gfx::Stats& a_st)
+		{
+			return json{
+				{ "pixels", a_st.pixels },
+				// nonFinitePct is listed first deliberately — it is the number that
+				// gets overlooked, and a NaN buffer displays black while reading
+				// "bright" to any exponent test. darkPct EXCLUDES non-finite pixels,
+				// so the two never quietly absorb each other.
+				{ "nonFinitePct", a_st.nonFinitePct },
+				{ "darkPct", a_st.darkPct },
+				{ "meanLuma", a_st.meanLuma },
+				{ "maxChannel", a_st.maxChannel },
+			};
+		}
+
 		json RenderTargetHandler(const json& a_args, const ToolContext&)
 		{
 			const std::string action = a_args.value("action", std::string("list"));
@@ -117,11 +164,200 @@ namespace dvb::tools
 				});
 			}
 
-			// 501 and not 400: the action exists and is documented, it is switched off.
-			if (action == "stats" || action == "dump")
-				throw ToolError(501, kReadbackDisabled);
+			if (action != "stats" && action != "dump")
+				throw ToolError(400, "rendertarget: unknown action '" + action + "' (list|stats|dump)");
 
-			throw ToolError(400, "rendertarget: unknown action '" + action + "' (list|stats|dump)");
+			// 501, not 400: the action exists, this runtime cannot do it safely.
+			if (!MainThread::ConfinedToMainThread())
+				throw ToolError(501, kNoMainThread);
+
+			if (!a_args.contains("index"))
+				throw ToolError(400, "rendertarget: 'index' is required (see action='list')");
+			const auto index = a_args["index"].get<std::uint32_t>();
+
+			// 0 = full resolution. The default trades a little detail for a capture
+			// that returns promptly and produces a file you can open, rather than a
+			// 25 MB bitmap of a 4K buffer.
+			const auto        maxDim = a_args.value("maxDimension", 1024u);
+			const bool        wantFile = (action == "dump");
+			const std::string label = a_args.value("label", std::string{});
+
+			// Bisecting aid, kept because it is cheap and found TS-031: stop after one step,
+			// so a live run can tell which D3D call breaks a game, not only that one does.
+			//   create - create the staging texture and release it: no copy, no map
+			//   copy   - create, queue the copy, let kSettleFrames frames pass, release: no map
+			//   map    - the whole readback (default)
+			const std::string stage = a_args.value("stage", std::string("map"));
+			if (stage != "create" && stage != "copy" && stage != "map")
+				throw ToolError(400, "rendertarget: 'stage' must be create, copy or map");
+			if (wantFile && stage != "map")
+				throw ToolError(400, "rendertarget: action='dump' needs stage='map'");
+			constexpr int kSettleFrames = 10;
+
+			// Every step logs before and after its D3D call, at info, which flushes. If the
+			// game dies inside a call, the last line of devbench.log names that call. The
+			// first non-blocking build logged nothing, and its crash could not be placed;
+			// the build that did log is the one that showed the tasks' threads changing.
+			const auto seq = g_readbackSeq.fetch_add(1) + 1;
+			const auto step = [seq](std::string_view a_what) {
+				dlog::info("rendertarget #{} [thread {} frame {}] {}", seq, ::GetCurrentThreadId(), game::CurrentFrame(), a_what);
+			};
+
+			// Two phases, never a wait on the GPU inside the game's frame (gfx::PendingReadback
+			// says why): one main-thread task finds the target and queues its copy into
+			// devbench's own staging texture; later tasks each try once to map that copy with
+			// DO_NOT_WAIT. Analysis and the BMP write then run here on the listener thread:
+			// they read only devbench's CPU copy.
+			//
+			// State the tasks write is heap-held, not captured by reference: RunAndWait can time
+			// out while a task is already running, and that task must not then write through a
+			// dangling reference.
+			struct Shared
+			{
+				gfx::PendingReadback pending;
+				gfx::Surface         surface;
+				json                 source;
+				std::string          error;
+				unsigned long        taskThreadId = 0;
+			};
+			const auto shared = std::make_shared<Shared>();
+			const auto started = std::chrono::steady_clock::now();
+			const int  frameAtStart = game::CurrentFrame();
+			const auto framesSoFar = [frameAtStart]() {
+				const int now = game::CurrentFrame();
+				return (frameAtStart < 0 || now < 0) ? -1 : now - frameAtStart;
+			};
+
+			// On every way out of this handler, including a throw, the staging texture is
+			// released by a main-thread task: the thread that created it. Its deleter refuses
+			// any other thread (Capture.h), so without this the texture would leak rather
+			// than be released. If this task times out, the one still queued holds the last
+			// reference and drops it when it runs, on the main thread.
+			struct ReleaseOnTaskThread
+			{
+				std::shared_ptr<Shared>               shared;
+				std::function<void(std::string_view)> step;
+				~ReleaseOnTaskThread()
+				{
+					if (!shared->pending.Started())
+						return;
+					try {
+						MainThread::RunAndWait([s = shared, log = step]() -> json {
+							log("Release(staging): calling");
+							s->pending.staging.reset();
+							log("Release(staging): returned");
+							return nullptr;
+						});
+					} catch (...) {
+						// A timeout here is not an error to report: the queued task keeps
+						// the texture alive until it runs, on the right thread.
+					}
+				}
+			} release{ shared, step };
+
+			MainThread::RunAndWait([shared, index, stage, step]() -> json {
+				if (!gfx::Device())
+					throw ToolError(503, "the renderer is not available yet");
+				const auto target = FindTarget(index);
+				if (!target.texture)
+					throw ToolError(404, std::format("no render target with index {} (see action='list')", index));
+				shared->source = DescribeTarget(target);
+				shared->taskThreadId = ::GetCurrentThreadId();
+				RequireMainThread();
+				step(std::format("begin: target {} = {}, stage={}", index, shared->source.dump(), stage));
+				const bool copy = (stage != "create");
+				step(copy ? "CreateTexture2D(STAGING) + CopySubresourceRegion: calling" : "CreateTexture2D(STAGING): calling");
+				shared->pending = gfx::BeginReadback(target.texture, shared->error, copy);
+				step(shared->pending.Started() ? "begin: returned" : "begin: refused: " + shared->error);
+				if (!shared->pending.Started())
+					throw ToolError(422, "rendertarget: " + shared->error);
+				return nullptr;
+			});
+
+			constexpr auto kBudget = std::chrono::milliseconds(5000);
+			const auto     remaining = [&]() {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(started + kBudget - std::chrono::steady_clock::now());
+			};
+			int polls = 0;
+
+			if (stage == "copy") {
+				// Let the GPU run the copy without ever mapping it: one empty task per drain,
+				// which is once per frame. Counted in drains, not frame-counter ticks, so it
+				// still ends on a runtime without a frame signal.
+				while (polls < kSettleFrames && remaining() > std::chrono::milliseconds(0)) {
+					++polls;
+					MainThread::RunAndWait([]() -> json { return nullptr; }, remaining());
+				}
+			} else if (stage == "map") {
+				for (;;) {
+					if (remaining() <= std::chrono::milliseconds(0))
+						throw ToolError(504, std::format(
+												 "rendertarget: the GPU had not executed the copy of target {} after {} polls in {} ms ({} frames, -1 = no frame "
+												 "signal); nothing was mapped and nothing waited on the GPU. With frames advancing this is unexpected - report it.",
+												 index, polls, kBudget.count(), framesSoFar()));
+					++polls;
+					const json state = MainThread::RunAndWait(
+						[shared, maxDim, step, polls]() -> json {
+							RequireMainThread();
+							step(std::format("Map(READ, DO_NOT_WAIT) poll {}: calling", polls));
+							gfx::Surface surface;
+							std::string  err;
+							switch (gfx::PollReadback(shared->pending, maxDim, surface, err)) {
+							case gfx::ReadbackPoll::kPending:
+								step(std::format("Map poll {}: WAS_STILL_DRAWING", polls));
+								return "pending";
+							case gfx::ReadbackPoll::kReady:
+								step(std::format("Map poll {}: mapped, copied {}x{}, unmapped", polls, surface.width, surface.height));
+								shared->surface = std::move(surface);
+								return "ready";
+							default:
+								step(std::format("Map poll {}: failed: {}", polls, err));
+								shared->error = std::move(err);
+								return "failed";
+							}
+						},
+						remaining());
+					if (state == "ready")
+						break;
+					if (state == "failed")
+						throw ToolError(500, "rendertarget: " + shared->error);
+				}
+			}
+
+			// How the copy came back, so a caller can see it did not stall the game. The
+			// thread id is the one the main-thread tasks ran on, in a debugger's terms.
+			json readback{
+				{ "seq", seq },
+				{ "stage", stage },
+				{ "method", "copy queued in one main-thread task, mapped with DO_NOT_WAIT in later ones" },
+				{ "polls", polls },
+				{ "ms", std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count() },
+				{ "frames", framesSoFar() },
+				{ "taskThreadId", std::format("0x{:X}", shared->taskThreadId) },
+			};
+			json out{
+				{ "index", index },
+				{ "source", shared->source },
+				{ "readback", std::move(readback) },
+			};
+			if (stage != "map")
+				return out;  // the release task runs as `release` goes out of scope
+
+			const auto& surface = shared->surface;
+			out["captured"] = json{ { "width", surface.width }, { "height", surface.height } };
+			out["stats"] = StatsJson(gfx::Analyse(surface));
+			if (wantFile) {
+				const auto  n = g_dumpSeq.fetch_add(1) + 1;
+				const auto  name = label.empty() ?
+				                       std::format("rt{:03}_{:04}.bmp", index, n) :
+				                       std::format("rt{:03}_{:04}_{}.bmp", index, n, label);
+				const auto  path = host::DataDir() / "captures" / name;
+				std::string err;
+				if (!gfx::WriteBMP(path, surface, err))
+					throw ToolError(500, "rendertarget: " + err);
+				out["file"] = Utf8(path);
+			}
+			return out;
 		}
 
 		// ---------------------------------------------------------------- measure
@@ -220,27 +456,37 @@ namespace dvb::tools
 			ToolDescriptor rt;
 			rt.name = "rendertarget";
 			rt.description =
-				"Look INSIDE the renderer: list the engine's render targets — the G-buffer, the light "
+				"Look INSIDE the renderer: list the engine's render targets, measure one, or dump it to "
+				"an image. This is what a screenshot cannot give you — the G-buffer, the light "
 				"accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. "
 				"action='list' → every live target as { index, width, height, format, formatName, "
 				"arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, "
 				"decodable }, plus 'threading' { taskThreadId, taskThreadIdHex, mainThreadId, "
 				"tasksOffMainThread, confinedToMainThread, deviceCreationFlags, singleThreadedDevice, "
-				"multithreadProtected }: which thread this task ran on against the game's main thread "
-				"(mainThreadId 0 = not recorded), how many tasks have run anywhere else, whether "
-				"tasks are established to stay on the main thread, and whether the D3D11 device "
-				"serialises calls from other threads (multithreadProtected null = not reported by "
-				"the runtime). action='stats' and action='dump' (CPU readback, BMP dump) are "
-				"currently DISABLED and answer 501: on Fallout 4 VR a readback hung the game twice "
-				"and then crashed the GPU driver, and they stay off until readback runs where the "
-				"renderer allows it.";
+				"multithreadProtected }. action='stats' → copies target 'index' back to the CPU and "
+				"returns { nonFinitePct, darkPct, meanLuma, maxChannel } WITHOUT writing a file; "
+				"action='dump' → the same plus a 24-bit BMP under "
+				"Data/<extender>/Plugins/devbench/captures (optional 'label' in the filename). Both "
+				"run only where devbench's tasks are established to stay on the game's main thread "
+				"(threading.confinedToMainThread), and answer 501 elsewhere: a readback from another "
+				"thread crashed the GPU driver on Fallout 4 VR. The copy is queued in one frame and "
+				"mapped without waiting in a later one, so the game never stalls on the GPU; "
+				"'readback' in the result says how it went { seq, stage, polls, ms, frames, "
+				"taskThreadId }, and every D3D step is logged to devbench.log. 'maxDimension' "
+				"(default 1024, 0 = native) integer-downsamples by nearest sample, never averaging, "
+				"because averaging hides the single-pixel artefact you are hunting. HDR is "
+				"Reinhard-tone-mapped and NaN/Inf pixels are painted MAGENTA rather than clamped. Read "
+				"nonFinitePct before darkPct: NaN displays black but reads as BRIGHT to any exponent "
+				"test. 'stage' (create | copy | map, default map) stops a stats call after that step, "
+				"to bisect a failure.";
 			rt.inputSchema = json{
 				{ "type", "object" },
 				{ "properties", json{
-									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "stats", "dump" }) }, { "description", "default 'list'; 'stats' and 'dump' are disabled (501)" } } },
-									{ "index", json{ { "type", "integer" }, { "description", "stats/dump (disabled): engine render-target index, from action='list'" } } },
-									{ "maxDimension", json{ { "type", "integer" }, { "description", "stats/dump (disabled): downsample so the longest side fits; default 1024, 0 = native" } } },
-									{ "label", json{ { "type", "string" }, { "description", "dump (disabled): appended to the filename" } } } } }
+									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "stats", "dump" }) }, { "description", "default 'list'" } } },
+									{ "index", json{ { "type", "integer" }, { "description", "stats/dump: engine render-target index, from action='list'" } } },
+									{ "maxDimension", json{ { "type", "integer" }, { "description", "stats/dump: downsample so the longest side fits; default 1024, 0 = native" } } },
+									{ "label", json{ { "type", "string" }, { "description", "dump: appended to the filename" } } },
+									{ "stage", json{ { "type", "string" }, { "enum", json::array({ "create", "copy", "map" }) }, { "description", "stats: stop after this step, to bisect a failure; default 'map' (the whole readback)" } } } } }
 			};
 			a_registry.Register(std::move(rt), &RenderTargetHandler);
 		}

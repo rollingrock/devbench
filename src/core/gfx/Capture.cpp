@@ -1,5 +1,6 @@
 #include "core/gfx/Capture.h"
 
+#include "core/Log.h"
 #include "core/gfx/Device.h"
 #include "core/gfx/Format.h"
 
@@ -21,9 +22,9 @@ namespace dvb::gfx
 		}
 	}
 
-	Surface Readback(ID3D11Texture2D* a_texture, std::uint32_t a_maxDimension, std::string& a_error)
+	PendingReadback BeginReadback(ID3D11Texture2D* a_texture, std::string& a_error, bool a_queueCopy)
 	{
-		Surface out;
+		PendingReadback out;
 		if (!a_texture) {
 			a_error = "no such render target";
 			return out;
@@ -38,10 +39,9 @@ namespace dvb::gfx
 		D3D11_TEXTURE2D_DESC desc{};
 		a_texture->GetDesc(&desc);
 
-		const std::uint32_t bpp = BytesPerPixel(desc.Format);
-		if (bpp == 0) {
-			// Refuse BEFORE mapping. An unknown stride is not a decode inconvenience,
-			// it is an out-of-bounds read of the mapped surface.
+		if (BytesPerPixel(desc.Format) == 0) {
+			// Refuse BEFORE creating anything. An unknown stride is not a decode
+			// inconvenience, it is an out-of-bounds read of the mapped surface.
 			a_error = std::format("format {} is not decodable by this build", FormatName(desc.Format));
 			return out;
 		}
@@ -67,35 +67,80 @@ namespace dvb::gfx
 		sd.MiscFlags = 0;
 
 		ID3D11Texture2D* staging = nullptr;
-		if (FAILED(dev->CreateTexture2D(&sd, nullptr, &staging)) || !staging) {
-			a_error = "CreateTexture2D(STAGING) failed";
+		if (const HRESULT hr = dev->CreateTexture2D(&sd, nullptr, &staging); FAILED(hr) || !staging) {
+			a_error = std::format("CreateTexture2D(STAGING) failed: 0x{:08X}", static_cast<std::uint32_t>(hr));
 			return out;
 		}
+
+		// Owned from here, so every path out releases it, and only on this thread (see
+		// PendingReadback::staging for why the thread matters).
+		out.staging = std::shared_ptr<ID3D11Texture2D>(staging, [owner = ::GetCurrentThreadId()](ID3D11Texture2D* a_t) {
+			if (::GetCurrentThreadId() == owner) {
+				a_t->Release();
+				return;
+			}
+			dlog::warn("gfx: readback staging texture reached its last release on thread {} instead of {}; leaked rather than released off-thread",
+				::GetCurrentThreadId(), owner);
+		});
 
 		// Slice 0, mip 0. An array target (stereo VR eyes) reports only the first
 		// slice; saying which is better than silently averaging or picking at random.
-		ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, a_texture, 0, nullptr);
+		// Queued, not executed: the GPU runs it whenever it reaches it.
+		if (a_queueCopy)
+			ctx->CopySubresourceRegion(staging, 0, 0, 0, 0, a_texture, 0, nullptr);
 
-		D3D11_MAPPED_SUBRESOURCE m{};
-		if (FAILED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m))) {
-			staging->Release();
-			a_error = "Map(D3D11_MAP_READ) failed";
-			return out;
+		out.width = desc.Width;
+		out.height = desc.Height;
+		out.format = desc.Format;
+		return out;
+	}
+
+	ReadbackPoll PollReadback(const PendingReadback& a_pending, std::uint32_t a_maxDimension, Surface& a_out, std::string& a_error)
+	{
+		if (!a_pending.Started()) {
+			a_error = "no readback in flight";
+			return ReadbackPoll::kFailed;
 		}
+		auto* ctx = Context();
+		if (!ctx) {
+			a_error = "the renderer is not available (no context)";
+			return ReadbackPoll::kFailed;
+		}
+
+		// DO_NOT_WAIT is the point (see PendingReadback): a copy the GPU has not executed
+		// yet answers WAS_STILL_DRAWING instead of stalling the game's frame until it has.
+		D3D11_MAPPED_SUBRESOURCE m{};
+		const HRESULT            hr = ctx->Map(a_pending.staging.get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+		if (hr == DXGI_ERROR_WAS_STILL_DRAWING)
+			return ReadbackPoll::kPending;
+		if (FAILED(hr)) {
+			a_error = std::format("Map(D3D11_MAP_READ, DO_NOT_WAIT) failed: 0x{:08X}", static_cast<std::uint32_t>(hr));
+			return ReadbackPoll::kFailed;
+		}
+		// Unmap on every path out, including a bad_alloc from the resize below.
+		struct Unmap
+		{
+			ID3D11DeviceContext* ctx;
+			ID3D11Texture2D*     texture;
+			~Unmap() { ctx->Unmap(texture, 0); }
+		} unmap{ ctx, a_pending.staging.get() };
+
+		const std::uint32_t bpp = BytesPerPixel(a_pending.format);
 
 		// Integer-stride downsample. Nearest-sample rather than a box filter on
 		// purpose: this is an instrument, and averaging would hide exactly the
 		// single-pixel NaN or the one-pixel-wide seam somebody is looking for.
 		std::uint32_t step = 1;
 		if (a_maxDimension > 0) {
-			const auto largest = std::max(desc.Width, desc.Height);
+			const auto largest = std::max(a_pending.width, a_pending.height);
 			while (largest / step > a_maxDimension)
 				++step;
 		}
 
-		out.width = (desc.Width + step - 1) / step;
-		out.height = (desc.Height + step - 1) / step;
-		out.format = desc.Format;
+		Surface out;
+		out.width = (a_pending.width + step - 1) / step;
+		out.height = (a_pending.height + step - 1) / step;
+		out.format = a_pending.format;
 		out.pitch = out.width * bpp;
 		out.bytes.resize(static_cast<std::size_t>(out.pitch) * out.height);
 
@@ -112,9 +157,8 @@ namespace dvb::gfx
 			}
 		}
 
-		ctx->Unmap(staging, 0);
-		staging->Release();
-		return out;
+		a_out = std::move(out);
+		return ReadbackPoll::kReady;
 	}
 
 	Stats Analyse(const Surface& a_surface)
