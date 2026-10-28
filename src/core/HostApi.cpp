@@ -5,6 +5,7 @@
 #include "core/GameState.h"
 #include "core/Json.h"
 #include "core/Log.h"
+#include "core/MainThread.h"
 #include "core/ToolExtensions.h"
 #include "core/ToolRegistry.h"
 
@@ -247,12 +248,42 @@ namespace dvb::HostApi
 		return reinterpret_cast<void*>(&GetApi);
 	}
 
+	namespace
+	{
+		// The C-ABI's main-thread service: the same queue devbench's own tools use
+		// (MainThread::Post), so a mod gets exactly the guarantee devbench has, and
+		// ConfinedToMainThread says how strong that is on this runtime.
+		bool RunOnMainThread(DevBenchAPI::MainThreadFn a_fn, void* a_ctx)
+		{
+			if (!a_fn)
+				return false;
+			return MainThread::Post([a_fn, a_ctx]() { a_fn(a_ctx); });
+		}
+
+		bool ConfinedToMainThread() { return MainThread::ConfinedToMainThread(); }
+
+		constinit const DevBenchAPI::DevBenchMainThreadApi g_mainThreadApi{ 1, &RunOnMainThread, &ConfinedToMainThread };
+	}
+
+	const void* GetMainThreadEntry(const void* a_callerAddress)
+	{
+		auto name = ModuleNameAt(a_callerAddress);
+		dlog::info("devbench: provided main-thread service to {} (export)", name);
+		NoteConsumer(std::move(name), "main-thread export");
+		return &g_mainThreadApi;
+	}
+
 	void OnInterfaceRequest(std::uint32_t a_type, void* a_data, const char* a_sender)
 	{
 		if (a_type == DevBenchAPI::DevBenchMessage::kMessage_GetInterface && a_data) {
 			static_cast<DevBenchAPI::DevBenchMessage*>(a_data)->GetApiFunction = GetApi;
 			NoteConsumer(a_sender ? std::string(a_sender) : std::string("<?>"), "message");
 			dlog::info("devbench: provided plugin interface to {}", a_sender ? a_sender : "<?>");
+		}
+		if (a_type == DevBenchAPI::DevBenchMainThreadMessage::kMessage_GetMainThread && a_data) {
+			static_cast<DevBenchAPI::DevBenchMainThreadMessage*>(a_data)->api = &g_mainThreadApi;
+			NoteConsumer(a_sender ? std::string(a_sender) : std::string("<?>"), "main-thread message");
+			dlog::info("devbench: provided main-thread service to {}", a_sender ? a_sender : "<?>");
 		}
 	}
 

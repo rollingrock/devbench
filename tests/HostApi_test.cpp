@@ -4,6 +4,7 @@
 #include "core/EventBus.h"
 #include "core/HostApi.h"
 #include "core/ToolRegistry.h"
+#include "test_platform.h"
 
 #include <cmath>
 
@@ -93,4 +94,59 @@ TEST_CASE("HostApi forwards time-scale requests and clears callbacks on reinitia
 	dvb::HostApi::Init(registry, events, 12200);
 	CHECK(!api->SetTimeScale(2.0F, 1234, "consumer"));
 	CHECK(std::isnan(api->GetTimeScale()));
+}
+
+// The main-thread service (DevBenchAPI.h, DevBenchMainThreadApi): its own message, the
+// host's MainThread::Post queue behind it. PlatformStubs.cpp holds posted functions until
+// DrainPosted(), the way a frame would.
+TEST_CASE("the main-thread service comes from its own message and runs callbacks only when the queue drains")
+{
+	DevBenchAPI::DevBenchMainThreadMessage message;
+	dvb::HostApi::OnInterfaceRequest(DevBenchAPI::DevBenchMainThreadMessage::kMessage_GetMainThread, &message, "SomeMod");
+	CHECK(message.api != nullptr);
+	if (!message.api)
+		return;
+	CHECK(message.api->version == 1);
+	CHECK(dvb::HostApi::Consumers().back().route == "main-thread message");
+
+	static int   hits = 0;
+	static void* seen = nullptr;
+	int          token = 0;
+	hits = 0;
+	dvb::test::DrainPosted();  // nothing left over from another case
+	CHECK(message.api->RunOnMainThread(+[](void* a_ctx) { ++hits; seen = a_ctx; }, &token));
+	CHECK(hits == 0);  // queued, not run inline
+	CHECK(dvb::test::DrainPosted() == 1);
+	CHECK(hits == 1);
+	CHECK(seen == &token);
+	CHECK(!message.api->RunOnMainThread(nullptr, &token));
+	CHECK(dvb::test::DrainPosted() == 0);
+}
+
+TEST_CASE("the main-thread service reports confinement as the platform states it")
+{
+	DevBenchAPI::DevBenchMainThreadMessage message;
+	dvb::HostApi::OnInterfaceRequest(DevBenchAPI::DevBenchMainThreadMessage::kMessage_GetMainThread, &message, "SomeMod");
+	if (!message.api)
+		return;
+	dvb::test::g_confined = false;
+	CHECK(!message.api->ConfinedToMainThread());
+	dvb::test::g_confined = true;
+	CHECK(message.api->ConfinedToMainThread());
+	dvb::test::g_confined = false;
+}
+
+TEST_CASE("an unknown message leaves the main-thread service unset, and the export is the same service")
+{
+	// What a devbench without the service does with the request: nothing. The consumer
+	// then sees a null api, not a call into something that is not there.
+	DevBenchAPI::DevBenchMainThreadMessage message;
+	dvb::HostApi::OnInterfaceRequest(0x12345678u, &message, "SomeMod");
+	CHECK(message.api == nullptr);
+
+	DevBenchAPI::DevBenchMainThreadMessage viaMessage;
+	dvb::HostApi::OnInterfaceRequest(DevBenchAPI::DevBenchMainThreadMessage::kMessage_GetMainThread, &viaMessage, "SomeMod");
+	const auto* viaExport = dvb::HostApi::GetMainThreadEntry(reinterpret_cast<const void*>(&MarkerInThisModule));
+	CHECK(viaExport == viaMessage.api);
+	CHECK(dvb::HostApi::Consumers().back().route == "main-thread export");
 }

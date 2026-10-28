@@ -56,9 +56,14 @@ namespace dvb
 		// consumer at all. Null records "<?>".
 		[[nodiscard]] void* GetApiEntry(const void* a_callerAddress);
 
-		// Handle a DevBenchMessage::kMessage_GetInterface request. Call from the
-		// platform's message listener for every message — it no-ops unless it is the
-		// request. a_sender may be null.
+		// The same, for DevBenchAPI::DevBenchMainThreadApi: what the platform's
+		// DevBench_GetMainThreadApi export returns. Recorded as a Consumer the same way.
+		[[nodiscard]] const void* GetMainThreadEntry(const void* a_callerAddress);
+
+		// Handle a DevBenchMessage::kMessage_GetInterface or
+		// DevBenchMainThreadMessage::kMessage_GetMainThread request. Call from the
+		// platform's message listener for every message — it no-ops unless it is one of
+		// them. a_sender may be null.
 		void OnInterfaceRequest(std::uint32_t a_type, void* a_data, const char* a_sender);
 
 		// A plugin that requested the C-ABI interface (one entry per GetInterface call — a

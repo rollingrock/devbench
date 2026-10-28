@@ -140,6 +140,58 @@ namespace DevBenchAPI
 		// (devbench 1.20.0).
 		virtual float GetTimeScale() = 0;
 	};
+
+	// ---- Main-thread service: separate from IDevBenchInterface001 ON PURPOSE ----
+	//
+	// Run a callback once on the game's main thread, between frames, on the same queue
+	// devbench's own tools use. Why it exists: on Fallout 4 VR, F4SE's AddTask and
+	// AddUITask run tasks on WORKER threads (measured 2026-10-28, FO4VR 1.2.72: 43 of 43
+	// AddUITask tasks off the main thread), so a mod that "marshals to the main thread"
+	// through them does not get there, and D3D or game-state work done that way races the
+	// engine. devbench drains its own queue right after the frame is drawn and submitted.
+	//
+	// Discovered by its OWN message, not by a new IDevBenchInterface001 slot or revision:
+	// a devbench without it ignores the message and leaves `api` null, so the answer is
+	// "not supported" rather than a call through a vtable slot that is not there. A
+	// revision cannot carry it, because GetApi(n) has always returned the 001 interface
+	// for any n >= 1, and a build number cannot either, because this fork reports
+	// upstream's version. On Fallout, where the message route can miss (see
+	// DevBench_GetApiFunction), the DLL also exports DevBench_GetMainThreadApi.
+	// DevBenchAPI.cpp's GetDevBenchMainThread() tries both.
+	using MainThreadFn = void (*)(void* a_ctx);
+
+	struct DevBenchMainThreadApi
+	{
+		// 1 = the fields below. A later version only appends.
+		std::uint32_t version = 1;
+
+		// Queue a_fn(a_ctx) to run once on the main thread and return at once. Callable
+		// from any thread; from the main thread itself, a_fn runs on a later frame.
+		// false = not queued (the host has no queue at all); a_fn will not be called.
+		// a_fn must not throw, and a_ctx must stay valid until a_fn has run.
+		bool (*RunOnMainThread)(MainThreadFn a_fn, void* a_ctx) = nullptr;
+
+		// Whether devbench has ESTABLISHED, by measurement, that this queue runs on the
+		// game's main thread on this runtime. true on Fallout 4 VR 1.2.72. false means
+		// "not established": on another Fallout runtime the queue falls back to F4SE's
+		// AddTask; on Skyrim it is SKSE's task queue, which nothing here has measured.
+		bool (*ConfinedToMainThread)() = nullptr;
+	};
+
+	// Message used to fetch DevBenchMainThreadApi (a fixed, randomly chosen id). Same
+	// dispatch as DevBenchMessage, to the same receiver.
+	struct DevBenchMainThreadMessage
+	{
+		enum : std::uint32_t
+		{
+			kMessage_GetMainThread = 0x5d27e0b1
+		};
+		const DevBenchMainThreadApi* api = nullptr;  // stays null on a devbench without it
+	};
+
+	// Consumer helper (DevBenchAPI.cpp): the main-thread service, or nullptr when this
+	// devbench does not offer it. Cached after the first success.
+	const DevBenchMainThreadApi* GetDevBenchMainThread();
 }
 
 extern DevBenchAPI::IDevBenchInterface001* g_devBenchInterface;

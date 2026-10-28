@@ -10,6 +10,38 @@
 // on that add_files() line in xmake.lua.
 
 #include "core/GameState.h"
+#include "core/MainThread.h"
+#include "test_platform.h"
+
+#include <utility>
+
+// MainThread's queue-without-waiting half, which HostApi's main-thread service calls.
+// Posted functions are held until a test drains them, the way a frame would; the
+// confinement answer is whatever the test sets.
+namespace dvb::test
+{
+	bool                               g_confined = false;
+	std::vector<std::function<void()>> g_posted;
+
+	std::size_t DrainPosted()
+	{
+		auto batch = std::exchange(g_posted, {});
+		for (auto& fn : batch)
+			fn();
+		return batch.size();
+	}
+}
+
+namespace dvb::MainThread
+{
+	bool Post(std::function<void()> a_fn)
+	{
+		test::g_posted.push_back(std::move(a_fn));
+		return true;
+	}
+
+	bool ConfinedToMainThread() { return test::g_confined; }
+}
 
 namespace dvb::game
 {

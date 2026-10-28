@@ -24,6 +24,14 @@ extern "C" __declspec(dllexport) void* DevBench_GetApiFunction()
 	return dvb::HostApi::GetApiEntry(_ReturnAddress());
 }
 
+// The same route for DevBenchAPI::DevBenchMainThreadApi (DevBenchAPI.h says why it is
+// a separate service). A devbench without it has no such export, so GetProcAddress
+// answers null: "not supported", never a bad call.
+extern "C" __declspec(dllexport) const void* DevBench_GetMainThreadApi()
+{
+	return dvb::HostApi::GetMainThreadEntry(_ReturnAddress());
+}
+
 // devbench, Fallout 4 / Fallout 4 VR entry point.
 //
 // One DLL serves both runtimes: CommonLibF4 (rollingrock fork) resolves per-runtime

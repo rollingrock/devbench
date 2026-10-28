@@ -92,4 +92,37 @@ namespace DevBenchAPI
 		g_devBenchInterface = static_cast<IDevBenchInterface001*>(message.GetApiFunction(1));
 		return g_devBenchInterface;
 	}
+
+	const DevBenchMainThreadApi* GetDevBenchMainThread()
+	{
+		static const DevBenchMainThreadApi* cached = nullptr;
+		if (cached)
+			return cached;
+
+#if defined(DEVBENCHAPI_GAME_FALLOUT4)
+		const auto messaging = F4SE::GetMessagingInterface();
+#else
+		const auto messaging = SKSE::GetMessagingInterface();
+#endif
+		// Same dispatch as GetDevBenchInterface001. A devbench without the service
+		// ignores this message id, so `api` simply stays null.
+		DevBenchMainThreadMessage message;
+		if (messaging)
+			messaging->Dispatch(DevBenchMainThreadMessage::kMessage_GetMainThread, &message,
+				sizeof(message), DevBenchPluginName);
+#if defined(DEVBENCHAPI_GAME_FALLOUT4)
+		// Same load-order fallback as above; absent from a devbench without the service.
+		if (!message.api) {
+			if (const auto mod = ::GetModuleHandleW(L"devbench.dll")) {
+				if (const auto entry = reinterpret_cast<const void* (*)()>(
+						::GetProcAddress(mod, "DevBench_GetMainThreadApi")))
+					message.api = static_cast<const DevBenchMainThreadApi*>(entry());
+			}
+		}
+#endif
+		// A later version only appends, so anything >= 1 has the fields this header knows.
+		if (message.api && message.api->version >= 1)
+			cached = message.api;
+		return cached;
+	}
 }
