@@ -2,7 +2,7 @@
 
 _Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.32.0.
 Both targets build — Fallout 4 (CMake) and Skyrim (xmake) — and the host-independent
-unit tests pass. Written 2026-08-15; status updated 2026-10-26._
+unit tests pass. Written 2026-08-15; status updated 2026-10-28._
 
 This is the working note behind the split, and the thing to read before reviewing the
 branch. It answers three questions in order: **why a fork and not a port**, **where the
@@ -166,7 +166,8 @@ rendertarget action='stats' index=12                -> nonFinitePct, darkPct, me
 rendertarget action='dump'  index=12 label='before' -> the same, plus a BMP on disk
 ```
 
-`stats` and `dump` are currently disabled (501) on every platform: see §5.
+`stats` and `dump` run only where the platform has established that its main-thread tasks
+stay on the main thread (Fallout 4 VR 1.2.72 today), and answer 501 elsewhere: see §5.
 
 The platform seam it sits on is three functions (`core/gfx/Device.h`): device, context,
 and "enumerate the targets the renderer owns, by engine index". Everything else —
@@ -238,9 +239,9 @@ that claims less:
   mods register tools through the C-ABI; [FALLOUT4.md](FALLOUT4.md) lists what has been
   confirmed. Flat Fallout 4 has not been loaded yet.
 - ✅ **The Skyrim xmake target builds after the move** (VS 2026, `releasedbg`, re-checked
-  2026-10-26 after the upstream 1.32.0 merge), and `devbench-tests` passes — 336 cases,
-  including the core files the merges added. Building is not running: this branch's Skyrim
-  DLL has not been loaded in Skyrim since the 1.28.0 merge.
+  2026-10-28), and `devbench-tests` passes: 348 cases, including the core files the
+  merges added. Building is not running: this branch's Skyrim DLL has not been loaded in
+  Skyrim since the 1.28.0 merge.
 - ⚠️ **`game::CurrentFrame()` on Fallout 4 VR** reads `BSGraphics::State::frameCount` at a
   measured image offset, because the VR address library does not cover that id. It is
   plausibility-gated and returns `-1` rather than a garbage number when the gate fails;
@@ -252,16 +253,23 @@ that claims less:
 - ✅ **The renderer struct offsets hold on Fallout 4 VR 1.2.72.** `rendertarget`
   `list`/`stats`/`dump` ran live on 2026-10-15 (True Scopes' rig): a dump of physical slot
   94 decoded as R11G11B10 into a finite, sensible image. Flat-rim is still unconfirmed.
-- ❌ **…but readback is not safe on FO4VR, so `stats`/`dump` are disabled (501).**
-  - A blocking readback hung the main thread for good twice, ~1 s after the call
-    (2026-10-15). It was stuck in the OpenVR submit's `ID3D11DeviceContext::Flush`.
-  - A non-blocking test build crashed the NVIDIA driver on its first call (2026-10-26).
-  - Both issue a copy and a `Map` on the engine's immediate context from an F4SE task.
-    Measured since: that task runs on thread 0, which also draws the world and submits to
-    VR. F4SE drains it after the frame is submitted, the device is free-threaded, and the
-    target is a plain render target (not shared). No D3D11 rule is known to be broken.
-    The cause is open; an instrumented branch logs every step to find it. Details in
-    [FALLOUT4.md](FALLOUT4.md).
+- ✅ **Main-thread tasks run on the main thread on FO4VR 1.2.72, and readback works.**
+  F4SE VR's task queues run tasks on worker threads (measured 2026-10-28: through
+  `AddTask`, 7 tasks on 6 threads; through `AddUITask`, 43 of 43 on workers). So every
+  tool that relied on `RunAndWait` for main-thread access was exposed. A readback from a
+  worker had hung the game twice (2026-10-15) and crashed the NVIDIA driver (2026-10-26),
+  and a `console load` hang fits the same cause. The Fallout platform now drains its own
+  queue right after `Main::OnIdle` calls `Main::Swap` (exact-executable, checked before
+  patching, `AddTask` fallback elsewhere). Checked live: every task on thread 0, and 13
+  readbacks clean, including a 1024² target with True Scopes drawing into it.
+  `rendertarget stats`/`dump` answer 501 on any runtime where that is not established.
+- ✅ **Mods can use the same queue.** `DevBenchMainThreadApi::RunOnMainThread` is a
+  separate C-ABI service, found by its own message (or export). A devbench without it
+  answers null instead of exposing a vtable slot. Unit-tested; no mod calls it in a game
+  yet.
+- ⚠️ **One behaviour change:** before the first frame is drawn through `Swap` (early
+  startup), a main-thread call waits and can 504 instead of running on a worker. Details
+  in [FALLOUT4.md](FALLOUT4.md), "Main thread".
 
 ## 6. Suggested review order
 

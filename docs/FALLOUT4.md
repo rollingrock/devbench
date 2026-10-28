@@ -11,12 +11,14 @@ with the Skyrim build. See [MULTIGAME.md](MULTIGAME.md) for how the two fit toge
 > **Status: runs on Fallout 4 VR; flat Fallout 4 not yet run.** On FO4VR the server starts,
 > the bridge keeps one session across game restarts, and `console`, `menu`, `inspect`,
 > `nodes` and `memory` have answered live requests. Two mods, True Scopes and FRIK, register
-> their own tools through the C-ABI. `rendertarget` `list`/`stats`/`dump` ran live on
-> FO4VR 1.2.72 (2026-10-15) and the renderer offsets hold, but readbacks then hung the game
-> twice and crashed the GPU driver once. **`stats` and `dump` are disabled (501)** until
-> that is understood; `list` works. See the known issue under `rendertarget` below.
-> `measure` and `log` have no recorded live run yet. Flat Fallout 4 uses the same DLL but
-> has never been loaded.
+> their own tools through the C-ABI. **Main-thread tasks run on the main thread on FO4VR
+> 1.2.72**, through devbench's own queue after `Main::Swap`; F4SE's queue had been running
+> them on worker threads (see "Main thread" below). `rendertarget` `list`/`stats`/`dump`
+> ran live on 1.2.72 (2026-10-28): 13 readbacks in one run, among them a 1024² target with
+> True Scopes drawing into it, all on the main thread and none stalling the game. Earlier
+> readbacks from worker threads hung the game and crashed the driver. On any other runtime
+> `stats`/`dump` answer 501. `measure` and `log` have no recorded live run yet. Flat
+> Fallout 4 uses the same DLL but has never been loaded.
 
 ## Install
 
@@ -111,52 +113,44 @@ A screenshot shows the final image. This shows the buffers that **produced** it 
 G-buffer, the light accumulation, the shadow map — which is where a rendering bug actually
 lives.
 
-> **Known issue: readback hangs or crashes FO4VR. `stats`/`dump` are disabled until it is
-> understood (open, True Scopes register TS-031).** All runs were on FO4VR 1.2.72 with the
-> SteamVR null driver.
->
-> - **2026-10-15, blocking readback:** twice the main thread stopped for good within ~1 s
->   of a `stats`/`dump`, in the game's OpenVR submit (`vrclient_x64` →
->   `ID3D11DeviceContext::Flush` → `NDXGI::CDevice::FlushAndEnqueueSetEvent` → driver →
->   `WaitForSingleObject`; no TDR).
-> - **2026-10-26, non-blocking test build:** the copy was queued in one task, then mapped
->   with `DO_NOT_WAIT` from later ones. The **first** `stats` crashed the game ~0.5 s in,
->   with an access violation in `nvwgf2umx.dll` on a driver worker thread and no game or
->   devbench frames on the stack.
->
-> Both builds issue `CopySubresourceRegion` and `Map` on the engine's immediate context from
-> an F4SE task, with no `ID3D11Multithread` lock. **What has been ruled out (2026-10-26,
-> measured unless marked):**
->
-> - **A thread race.** devbench's task thread is the game's thread 0 (`list`'s
->   `taskThreadId` matched cdb's thread 0 in the same process). Thread 0 also runs the
->   frame loop, `DrawWorld_And_UI` (True Scopes' render hook logged the same thread) and
->   the VR submit.
-> - **A mid-frame call.** F4SE drains its tasks in `Main::OnIdle` after `Main::Swap`
->   returns, i.e. after the frame is drawn and submitted. This one is from a static scan of
->   `Fallout4VR.exe`: the task-drain call at 0xD845E3 follows the `Main::Swap` call at
->   0xD844BC.
-> - **A single-threaded device.** Creation flags are 0x0 and multithread protection is off.
-> - **A shared resource.** The target read (physical 94, 1024², `R11G11B10_FLOAT`) has bind
->   flags 0x28 (shader resource + render target) and misc flags 0x0: no `SHARED`, no keyed
->   mutex.
->
-> So no rule of D3D11 is known to be broken, and the cause is still open. The 0.5 s
-> includes Buffout's time writing its crash log, so the fault may have come on the first
-> poll. An instrumented build that logs every D3D step and can stop after any one of them
-> is on branch `fix/rendertarget-readback-instrumented`. It is not on `main`. `list`
-> reports these facts (`threading`, and per target `usage`, `bindFlags`, `miscFlags`,
-> `cpuAccessFlags`); it reads descriptors only and has not been implicated.
-
 ```powershell
 $rt = "http://127.0.0.1:8930/api/tool/rendertarget"
 irm $rt -Method Post -ContentType application/json -Body '{"action":"list"}'
-# disabled for now (501), see the known issue above:
-#   {"action":"stats","index":12}
-#   {"action":"dump","index":12,"label":"before"}
+irm $rt -Method Post -ContentType application/json -Body '{"action":"stats","index":12}'
+irm $rt -Method Post -ContentType application/json -Body '{"action":"dump","index":12,"label":"before"}'
 ```
 
-The rest of this section describes `stats`/`dump` as they behave when enabled. Dumps land in `Data/F4SE/Plugins/devbench/captures`. `maxDimension` (default 1024, `0` =
+A readback never makes the game wait on the GPU. The copy is queued in one main-thread
+task and mapped with `DO_NOT_WAIT` in a later one, usually the next frame: about 20–35 ms
+for a 1024² target on FO4VR. The result's `readback` reports `{ seq, stage, polls, ms,
+frames, taskThreadId }`. Every D3D step is logged to `devbench.log` before and after the
+call, so if a game ever dies inside one, the last line names it. `stage`
+(`create` | `copy` | `map`) stops a `stats` call after that step, to bisect a failure.
+
+`stats`/`dump` run only where `list`'s `threading.confinedToMainThread` is true
+(FO4VR 1.2.72), and answer 501 anywhere else. Each task that touches D3D also checks its
+own thread first. Both rules come from TS-031 (True Scopes' register), which is worth
+knowing before reading a readback number:
+
+> **Resolved (2026-10-28): readbacks hung, then crashed, FO4VR because they ran on worker
+> threads.** A blocking readback hung the main thread twice (2026-10-15). The game stopped
+> in the OpenVR submit's `ID3D11DeviceContext::Flush` → driver → `WaitForSingleObject`. A
+> non-blocking one crashed the NVIDIA driver on its first call (2026-10-26): an access
+> violation in `nvwgf2umx.dll` on a driver worker thread. Ruled out on the way, by
+> measurement:
+>
+> - a single-threaded device (creation flags 0x0);
+> - a shared or keyed-mutex target (target 94 is a plain shader-resource and render
+>   target: bind 0x28, misc 0x0);
+> - the off-thread `Release` of the staging texture.
+>
+> A build that logged every D3D step with its thread showed what was left: seven
+> consecutive "main-thread" tasks on six different threads. The copy of 94 issued from one
+> of them crashed the driver (2026-10-28). With devbench's own main-thread queue (see
+> "Main thread" below), the same sequence ran clean: 13 readbacks on thread 0, including
+> three with True Scopes drawing into 94.
+
+Dumps land in `Data/F4SE/Plugins/devbench/captures`. `maxDimension` (default 1024, `0` =
 native) integer-downsamples so a 4K buffer stays openable; sampling is nearest-neighbour,
 **not** averaged, because averaging hides the single-pixel artefact you are hunting.
 
@@ -311,6 +305,35 @@ Three engine facts it is built around, worth not rediscovering:
 
 The console's history shows the command line above its output, as when typed.
 
+## Main thread
+
+Every tool that touches the game (`console`, `inspect`, `menu`, `nodes`, `rendertarget`, …)
+runs its work as a main-thread task. On Fallout 4 VR, **F4SE's task queues do not deliver
+that.** F4SE VR drains `AddTask` from a detour on the *entry* of `MessageQueueProcessTask`
+(0xDA87C0), which worker threads call too. Measured 2026-10-28 on 1.2.72, against cdb's
+thread 0:
+
+- through `AddTask`, 7 consecutive tasks ran on 6 different threads;
+- through `AddUITask`, all 43 tasks ran on worker threads.
+
+So devbench keeps its own queue and drains it right after `Main::OnIdle` calls
+`Main::Swap` (the call at +0xD844BC). That is thread 0, between frames, after the frame
+has been drawn and submitted. The call is checked before it is patched. On another
+runtime, or if the bytes do not match, devbench falls back to `AddTask` and logs why.
+Checked live: every task on thread 0 at the main menu and in game.
+
+- `rendertarget list` reports the facts: `threading.mainThreadId` (the thread F4SE loaded
+  the plugin on, which is thread 0), `tasksOffMainThread` (every task checks its thread
+  and counts any other) and `confinedToMainThread`.
+- **One behaviour change:** a call made before the first frame is drawn through `Swap`
+  (early startup, before the main menu) waits and can 504. Before, it ran on a worker.
+- OnIdle's own `MessageQueueProcessTask` call (+0xD845E3) looks like the natural site and
+  is the wrong one: it is skipped during play, so nothing would drain in game.
+
+Mods have the same problem. A mod that marshals to the main thread through F4SE's queue
+is on a worker thread in game, so devbench offers its queue through the C-ABI. See
+"Registering your own tools".
+
 ## Known gaps
 
 - **GPU stage timers** (per-pass GPU+CPU ms) are not ported. They need instrumentation
@@ -402,7 +425,21 @@ Two things that bite:
 
 - **Your handler runs on devbench's listener thread, not the main game thread.** Marshal
   yourself before touching game state. This is unchanged from Skyrim, and it is the single
-  most common way a registered tool crashes a game.
+  most common way a registered tool crashes a game. On Fallout 4 VR, do NOT marshal
+  through F4SE's `AddTask`/`AddUITask`: they run tasks on worker threads (see "Main
+  thread"). Use devbench's own queue instead:
+
+  ```cpp
+  if (const auto* mt = DevBenchAPI::GetDevBenchMainThread()) {
+      mt->RunOnMainThread(+[](void* a_ctx) { /* on the main thread, between frames */ }, ctx);
+      // mt->ConfinedToMainThread(): true where devbench has established it (FO4VR 1.2.72)
+  }
+  ```
+
+  It is a separate service from `IDevBenchInterface001`, found by its own message, or on
+  Fallout the `DevBench_GetMainThreadApi` export. A devbench without it answers null
+  rather than leaving a vtable slot to call blindly. `RunOnMainThread` returns at once;
+  `ctx` must stay valid until the callback has run.
 - **Check `GetBuildNumber()` before calling a late vtable slot.** `RegisterMenuHandler`
   needs `>= 10400`, `RegisterToolExtension` `>= 10500`. Calling a slot an older host does
   not have is not a graceful failure.
