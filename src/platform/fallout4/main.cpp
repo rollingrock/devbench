@@ -244,7 +244,9 @@ namespace
 
 namespace dvb::platform
 {
-	void InstallHost();  // Fallout4Host.cpp
+	void InstallHost();             // Fallout4Host.cpp
+	void MarkMainThread();          // MainThread.cpp
+	void InstallMainThreadQueue();  // MainThread.cpp
 }
 
 extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Query(const F4SE::QueryInterface* a_f4se, F4SE::PluginInfo* a_info)
@@ -271,6 +273,10 @@ extern "C" DLLEXPORT bool F4SEAPI F4SEPlugin_Load(const F4SE::LoadInterface* a_f
 	// Before anything else: the core's config paths, default port, and log sink all
 	// route through the host seam, so it has to exist before LoadConfig or a dlog call.
 	dvb::platform::InstallHost();
+	// The thread every main-thread task is checked against, and devbench's own drain on it:
+	// F4SE VR's task queues run tasks on worker threads (MainThread.cpp has the numbers).
+	dvb::platform::MarkMainThread();
+	dvb::platform::InstallMainThreadQueue();
 
 	const auto runtime = REL::Module::get().version();
 	logs::info("devbench {} loading — {} v{}.{}.{}", DEVBENCH_VERSION_STRING,

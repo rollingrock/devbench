@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 
 #include "core/Json.h"
@@ -46,4 +47,27 @@ namespace dvb::MainThread
 
 	/// Main-thread tasks queued via RunAndWait but not yet finished. Lock-free; listener-safe.
 	int PendingTasks();
+
+	/// The OS thread tasks are meant to run on (the game's main thread), or 0 when the
+	/// platform does not record it. Listener-safe.
+	std::uint32_t OwnerThreadId();
+
+	/// How many tasks have run on some thread OTHER than OwnerThreadId() since load. Not
+	/// hypothetical: on Fallout 4 VR, F4SE's AddTask queue drained on several worker
+	/// threads, and D3D calls made from those tasks crashed the GPU driver (TS-031). 0 when
+	/// the platform does not record it. Listener-safe.
+	std::uint64_t OffThreadRuns();
+
+	/// True only when the platform has established that every task runs on the game's
+	/// main thread: on Fallout 4 VR 1.2.72, devbench's own drain after Main::Swap is
+	/// installed. False means "not established", not "known bad". Anything that must
+	/// not run on another thread (D3D calls on the immediate context) checks this.
+	/// Listener-safe.
+	bool ConfinedToMainThread();
+
+	/// Queue a_fn to run once on the main thread and return at once, without waiting.
+	/// Unlike RunAndWait it is safe from any thread, the main thread included (a_fn
+	/// then runs on a later frame). Returns false, and a_fn is dropped, when the platform
+	/// cannot queue at all.
+	bool Post(std::function<void()> a_fn);
 }

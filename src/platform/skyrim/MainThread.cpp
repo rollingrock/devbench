@@ -100,4 +100,29 @@ namespace dvb::MainThread
 	{
 		return g_pendingTasks.load(std::memory_order_relaxed);
 	}
+
+	// Not recorded on Skyrim: SKSE's task queue has not been seen to drain off the main
+	// thread, and nothing here has measured it either way. So confinement is "not
+	// established" (false), which is the honest answer, not a claim that it is unsafe.
+	std::uint32_t OwnerThreadId() { return 0; }
+	std::uint64_t OffThreadRuns() { return 0; }
+	bool          ConfinedToMainThread() { return false; }
+
+	bool Post(std::function<void()> a_fn)
+	{
+		auto* task = SKSE::GetTaskInterface();
+		if (!task)
+			return false;
+		task->AddTask([fn = std::move(a_fn)]() {
+			// Nothing above this frame on the main thread would catch it.
+			try {
+				fn();
+			} catch (const std::exception& e) {
+				logs::error("devbench: a posted main-thread task threw: {}", e.what());
+			} catch (...) {
+				logs::error("devbench: a posted main-thread task threw a non-standard exception");
+			}
+		});
+		return true;
+	}
 }

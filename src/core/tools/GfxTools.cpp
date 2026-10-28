@@ -48,6 +48,11 @@ namespace dvb::tools
                 // print it differently, and the point is to compare the two.
                 { "taskThreadId", tid },
                 { "taskThreadIdHex", std::format("0x{:X}", tid) },
+                // 0 = the platform does not record it. On FO4VR the two once differed
+                // (F4SE ran tasks on worker threads, TS-031), which is why both are here.
+                { "mainThreadId", MainThread::OwnerThreadId() },
+                { "tasksOffMainThread", MainThread::OffThreadRuns() },
+                { "confinedToMainThread", MainThread::ConfinedToMainThread() },
                 { "deviceCreationFlags", std::format("0x{:X}", flags) },
                 { "singleThreadedDevice", (flags & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 },
 			};
@@ -219,9 +224,11 @@ namespace dvb::tools
 				"accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. "
 				"action='list' → every live target as { index, width, height, format, formatName, "
 				"arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, "
-				"decodable }, plus 'threading' { taskThreadId, "
-				"taskThreadIdHex, deviceCreationFlags, singleThreadedDevice, multithreadProtected }: "
-				"which thread devbench's main-thread tasks run on and whether the D3D11 device "
+				"decodable }, plus 'threading' { taskThreadId, taskThreadIdHex, mainThreadId, "
+				"tasksOffMainThread, confinedToMainThread, deviceCreationFlags, singleThreadedDevice, "
+				"multithreadProtected }: which thread this task ran on against the game's main thread "
+				"(mainThreadId 0 = not recorded), how many tasks have run anywhere else, whether "
+				"tasks are established to stay on the main thread, and whether the D3D11 device "
 				"serialises calls from other threads (multithreadProtected null = not reported by "
 				"the runtime). action='stats' and action='dump' (CPU readback, BMP dump) are "
 				"currently DISABLED and answer 501: on Fallout 4 VR a readback hung the game twice "
