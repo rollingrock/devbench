@@ -2,7 +2,7 @@
 
 _Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.32.0.
 Both targets build — Fallout 4 (CMake) and Skyrim (xmake) — and the host-independent
-unit tests pass. Written 2026-08-15; status updated 2026-10-28._
+unit tests pass. Written 2026-08-15; status updated 2026-11-07._
 
 This is the working note behind the split, and the thing to read before reviewing the
 branch. It answers three questions in order: **why a fork and not a port**, **where the
@@ -265,8 +265,11 @@ that claims less:
   `rendertarget stats`/`dump` answer 501 on any runtime where that is not established.
 - ✅ **Mods can use the same queue.** `DevBenchMainThreadApi::RunOnMainThread` is a
   separate C-ABI service, found by its own message (or export). A devbench without it
-  answers null instead of exposing a vtable slot. Unit-tested; no mod calls it in a game
-  yet.
+  answers null instead of exposing a vtable slot. Unit-tested. In game, True Scopes v0.3.90
+  obtains it at startup and reads it as confined to the main thread (2026-11-07, FO4VR
+  1.2.72). That run left no thread warning and no crash log. devbench does not log
+  individual `RunOnMainThread` calls, so this confirms the handshake; that a mod's callback
+  ran on the main thread is not yet measured.
 - ⚠️ **One behaviour change:** before the first frame is drawn through `Swap` (early
   startup), a main-thread call waits and can 504 instead of running on a worker. Details
   in [FALLOUT4.md](FALLOUT4.md), "Main thread".
