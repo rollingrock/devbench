@@ -5,6 +5,7 @@
 #include "core/GameState.h"
 #include "core/HostApi.h"
 #include "core/Server.h"
+#include "core/VRInput.h"
 #include "core/tools/CommonTools.h"
 #include "core/tools/GfxTools.h"
 
@@ -14,6 +15,7 @@
 #include <memory>
 #include <set>
 #include <spdlog/sinks/basic_file_sink.h>
+#include <thread>
 
 // Load-order-proof interface entry (see HostApi::GetApiEntry). A consumer does
 // GetModuleHandle("devbench.dll") + GetProcAddress("DevBench_GetApiFunction"),
@@ -91,6 +93,10 @@ namespace
 		// accept the key and quietly do nothing with it.
 		if (cfg.alwaysActive)
 			logs::warn("devbench: alwaysActive is not implemented on Fallout 4 yet; ignored");
+		// Same for autoDismissMenus (Skyrim's modal watch). disableVanityCamera defaults to
+		// true, so it is not warned about: Fallout simply has no idle camera handling.
+		if (!cfg.autoDismissMenus.empty())
+			logs::warn("devbench: autoDismissMenus is not implemented on Fallout 4 yet; ignored");
 
 		g_server = new dvb::Server("127.0.0.1", cfg.port);
 		g_server->Events().SetFrameProvider(&dvb::game::CurrentFrame);
@@ -163,6 +169,25 @@ namespace
 				"devbench: could not listen for cross-plugin interface requests at {} — "
 				"other plugins may not be able to register tools",
 				a_when);
+	}
+
+	/**
+	 * Installs the VR input hooks if OpenVR is up. On the last chance (kGameLoaded) a miss
+	 * starts a background retry every 250 ms for up to a minute; hooks installed that late
+	 * may sit behind other mods' hooks, which `input` status then reports per slot.
+	 */
+	void InstallVRInput(bool a_lastChance)
+	{
+		if (!REL::Module::IsVR() || dvb::MarkVRInputReady(g_server->Events()) || !a_lastChance)
+			return;
+		std::thread([] {
+			for (int attempt = 0; attempt < 240; ++attempt) {
+				std::this_thread::sleep_for(std::chrono::milliseconds(250));
+				if (dvb::MarkVRInputReady(g_server->Events()))
+					return;
+			}
+			logs::warn("devbench: OpenVR interfaces never became available; VR input stays unavailable");
+		}).detach();
 	}
 
 	const char* MessageName(std::uint32_t a_type)
@@ -247,6 +272,22 @@ namespace
 			(a_msg->type == F4SE::MessagingInterface::kGameDataReady ||
 				a_msg->type == F4SE::MessagingInterface::kGameLoaded))
 			dvb::InstallGameEvents(g_server->Events());
+
+		// VR input hooks. OpenVR comes up between kPostPostLoad and kGameDataReady, so
+		// both messages find it. Installing here puts devbench on the OpenVR slots before
+		// F4VR-CommonFramework mods, which patch the controller-state slots on the first
+		// frame after kGameLoaded, so their hooks see injected input as they see real input.
+		if (g_server && (a_msg->type == F4SE::MessagingInterface::kGameDataReady ||
+							a_msg->type == F4SE::MessagingInterface::kGameLoaded))
+			InstallVRInput(a_msg->type == F4SE::MessagingInterface::kGameLoaded);
+
+		// Never carry an injected tracked set across a scene reset.
+		if (g_server) {
+			if (a_msg->type == F4SE::MessagingInterface::kPreLoadGame)
+				dvb::ReleaseVRInputForLifecycle("preLoadGame");
+			else if (a_msg->type == F4SE::MessagingInterface::kNewGame)
+				dvb::ReleaseVRInputForLifecycle("newGame");
+		}
 	}
 }
 

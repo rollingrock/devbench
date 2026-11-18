@@ -15,7 +15,7 @@ includes("xmake/cpp-mcp.lua")
 set_project("devbench")
 set_license("GPL-3.0")
 
-local version = "1.32.0"
+local version = "1.36.0"
 local ver = version:split("%.")
 set_version(version)
 
@@ -200,13 +200,21 @@ add_files("src/core/DifficultyLogic.cpp") -- difficulty level names and parsing;
 add_files("src/core/ActorIdleLogic.cpp") -- looping-idle replay gap and due check; pure logic
 add_files("src/core/CaptureBurstLogic.cpp") -- burst capture request validation and provider event folding; pure logic
 add_files("src/core/ReachLogic.cpp") -- reach solver, request parsing and frame building; pure logic
+add_files("src/core/PoseLogic.cpp") -- pose request parsing, ready pose, tracking-to-world map and move frames; pure logic
+add_files("src/core/HandednessLogic.cpp") -- logical hand names and the wand-swap check; pure logic
 add_files("src/core/FormSearchLogic.cpp") -- form search matching, head part types and armor slot masks; pure logic
 add_files("src/core/HavokAnimationLogic.cpp") -- animation duration and track counts from a Havok packfile; pure logic
 add_files("src/core/PluginHeaderLogic.cpp") -- author, description and masters from a plugin's TES4 record; pure logic
+add_files("src/core/FilesLogic.cpp") -- the files tool's relative paths, globs and base64; pure logic
+add_files("src/core/RequestGuardLogic.cpp") -- which Origin and Host headers the server answers; pure logic
 add_files("src/core/InspectLogic.cpp") -- lights scope/budget/ordering and the handsReady predicate; pure logic
 add_files("src/core/ReplayTrajectory.cpp") -- pose keyframe sampling/interpolation; pure logic
 add_files("src/core/RecordingActivity.cpp") -- activity contract + input/trajectory interleave; pure logic
 add_files("src/core/DrawStatsLogic.cpp")
+add_files("src/core/Notices.cpp") -- notice board; pure logic
+add_files("src/core/GfxLogic.cpp") -- gfx path splitting and array index check; pure logic
+add_files("src/core/MapLogic.cpp") -- map tool argument validation; pure logic
+add_files("src/core/RunStatusLogic.cpp") -- run-status transcript compaction; pure logic
 add_headerfiles("tests/*.h")
 set_pcxxheader("tests/pch.h")
 add_defines("_WINSOCKAPI_")

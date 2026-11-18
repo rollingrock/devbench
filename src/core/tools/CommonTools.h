@@ -10,7 +10,8 @@ namespace dvb
 namespace dvb::tools
 {
 	/// Register the tools that need nothing from the game beyond "it is a Windows
-	/// process with an executable image and a log file": `ping`, `memory`, `log`.
+	/// process with an executable image, a log file and a Data folder": `ping`,
+	/// `memory`, `log`, `files`, and `quit` (through the host::RequestQuit seam).
 	///
 	/// Every platform calls this; game-specific tools are registered separately by
 	/// src/platform/<game>. Anything that ends up here must compile with no script

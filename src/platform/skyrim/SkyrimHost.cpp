@@ -69,4 +69,17 @@ namespace dvb::host
 		const auto dir = SKSE::log::log_directory();
 		return dir ? *dir : std::filesystem::path{};
 	}
+
+	/**
+	 * Sets Main::quitGame, the flag the console's qqq sets; the main loop then runs the
+	 * engine's own shutdown. CommonLibSSE-NG's runtime-data accessor places it per runtime.
+	 */
+	std::string RequestQuit()
+	{
+		auto* main = RE::Main::GetSingleton();
+		if (!main)
+			return "the engine's Main singleton is null";
+		main->GetRuntimeData().quitGame = true;
+		return {};
+	}
 }

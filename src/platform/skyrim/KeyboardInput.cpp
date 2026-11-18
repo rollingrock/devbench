@@ -1,13 +1,15 @@
 #include "KeyboardInput.h"
 
 #include "GameClock.h"
-#include "VRInput.h"
+#include "MouseInput.h"
+#include "ReachControl.h"
 #include "core/EventBus.h"
 #include "core/GameState.h"
 #include "core/KeyboardInputState.h"
 #include "core/MainThread.h"
 #include "core/MainThreadTask.h"
 #include "core/ToolRegistry.h"
+#include "core/VRInput.h"
 #include "core/VRInputState.h"
 
 #include <RE/B/BSInputEventQueue.h>
@@ -19,6 +21,7 @@
 #include <cstring>
 #include <future>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -292,6 +295,7 @@ namespace dvb
 															{ "keys", std::move(keys) },
 															{ "mouseButtons", json{ { "codeBase", kMouseCodeBase }, { "codeDomain", "mouseButton" }, { "engineDevice", "mouse" }, { "keys", json::array({ "mouseLeft", "mouseRight", "mouseMiddle" }) } } },
 														} },
+										  { "mouse", json{ { "actions", json::array({ "move", "down", "up", "tap", "click", "status" }) }, { "buttons", json::array({ "left", "right", "middle" }) }, { "coordinates", "game-window client pixels" } } },
 										  { "vrTrackedSet", VRInputCapabilities() },
 									  } },
 				};
@@ -782,10 +786,30 @@ namespace dvb
 			if (a_args.contains("device") && !a_args["device"].is_string())
 				throw ToolError(400, "'device' must be a string");
 			const std::string device = a_args.value("device", std::string("keyboard"));
-			if (IsVRInputDevice(device))
+			if (IsVRInputDevice(device)) {
+				// Reach is Skyrim's own; the shared VR input core knows only sequences and pose.
+				if (ReachControl::IsAction(action))
+					return ReachControl::Handle(action, a_args, a_ctx);
 				return HandleVRInput(a_args, a_ctx);
+			}
+			if (device == "mouse") {
+				if (action == "move" || action == "status")
+					return HandleMousePointer(a_args);
+				// Buttons are the keyboard path's mouse keys; 'click' is a tap.
+				static const std::map<std::string, std::string, std::less<>> kButtons{ { "left", "mouseLeft" }, { "right", "mouseRight" }, { "middle", "mouseMiddle" } };
+				const auto                                                   button = kButtons.find(a_args.value("button", std::string("left")));
+				if (button == kButtons.end())
+					throw ToolError(400, "mouse 'button' must be left, right or middle");
+				json keyed = a_args;
+				keyed["device"] = "keyboard";
+				keyed["key"] = button->second;
+				keyed["action"] = action == "click" ? std::string("tap") : action;
+				json result = HandleInputImpl(keyed, a_ctx);
+				result["device"] = "mouse";
+				return result;
+			}
 			if (device != "keyboard")
-				throw ToolError(400, "input contract v2 supports device='keyboard' or device='vrTrackedSet'");
+				throw ToolError(400, "input contract v2 supports device='keyboard', 'mouse' or 'vrTrackedSet'");
 			if (action == "status")
 				return KeyboardManager::Get().Status();
 
@@ -854,35 +878,58 @@ namespace dvb
 			"contains HMD, left-controller, and right-controller pose plus both controllers' complete "
 			"OpenVR button/touch/axis state. It is applied at the OpenVR compositor/system boundary, is "
 			"always asynchronous, has one owner, passes the real runtime through when inactive, and "
-			"returns a controlToken required for external stop. Failed controller-index restoration remains "
+			"returns a controlToken required for external stop. A sequence carrying the running sequence's "
+			"controlToken replaces its frames in place, without handing the devices back to the physical "
+			"controllers in between (same controller indices required). Failed controller-index restoration remains "
 			"retryable through that token. Ad-hoc sequences stop on lifecycle boundaries; recording replay "
-			"may explicitly survive the load/new-game events it is reproducing. There are deliberately no per-device or "
-			"per-button VR mutation actions: submit the coherent tracked set so poses and controls cannot "
-			"come from different clocks. device='vrTrackedSet' action='reach' places one or both hands next to nodes of the player: "
+			"may explicitly survive the load/new-game events it is reproducing. Poses only ever come from a whole "
+			"tracked-set frame, so they cannot come from different clocks; the one per-controller action is press. "
+			"device='vrTrackedSet' action='press' (hand, buttons and / or stick, durationMs default 100, delayMs) holds named buttons on one controller "
+			"for durationMs on top of the active sequence or reach hold, as its owner (409 otherwise); trigger and grip also "
+			"drive their analog axis to 1.0, and the controller packet number moves on at press start and end. stick [x, y] "
+			"(-1..1, y up) pushes that controller's thumbstick and lets it back to center when the press ends. Each hand has "
+			"its own press, so presses on both hands overlap; a new press on a hand replaces its last. It ends with "
+			"the sequence. capabilities.vrTrackedSet.pressButtons lists the names. "
+			"device='mouse': 'move' (x, y in game-window client pixels) sets the engine's menu cursor "
+			"and, with focusWindow=true, brings the game window to the foreground and sets the OS cursor so overlays that read it "
+			"(ImGui) see the pointer; 'down'/'up'/'tap'/'click' (button left|right|middle, default left) press through the same "
+			"engine input queue as the keyboard; 'status' reports the cursors and window focus. "
+			"device='vrTrackedSet' action='reach' places one or both hands next to nodes of the player: "
 			"it calibrates how a tracking-space move shows up in the world, injects the tracked set, re-reads the hand and "
 			"target nodes after each settle (the body follows the arms, so a node moves when a hand reaches it) and corrects "
 			"until every hand is within toleranceUnits, then holds holdMs; 'head' optionally aims the HMD at the hands or a "
-			"node. It returns { queued, runId } at once; action='reachStatus' (runId) reports { phase (queued | calibrating | "
+			"node. A hand's calibration from a reach that converged is reused while the player faces the same way (within "
+			"0.5 deg), re-anchored by one rest sample; calibrate='always' measures it again, and a load drops it. "
+			"It returns { queued, runId } at once; action='reachStatus' (runId) reports { phase (queued | calibrating | "
 			"reaching | holding | done | failed | stopped), iteration, worstErrorDistance, per hand { hand, node, error, errorDistance, handToNode }, "
-			"error, active, stopping (a stop was requested and the run is still releasing) }, and 'reachStop' ends it. One reach runs at a time (409); while it runs it replaces the HMD and both "
+			"calibration { left?, right?: measured | reused }, error, active, stopping (a stop was requested and the run is still releasing) }, and 'reachStop' ends it. One reach runs at a time (409); while it runs it replaces the HMD and both "
 			"controllers like a sequence, and it ends at a load. Fingers are not driven.";
 		input.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
-								{ "action", json{ { "type", "string" }, { "enum", json::array({ "capabilities", "status", "down", "up", "tap", "sequence", "stop", "releaseAll", "reach", "reachStatus", "reachStop" }) } } },
-								{ "device", json{ { "type", "string" }, { "enum", json::array({ "keyboard", "vrTrackedSet" }) }, { "description", "mutation/status device; omit for capabilities" } } },
+								{ "action", json{ { "type", "string" }, { "enum", json::array({ "capabilities", "status", "down", "up", "tap", "click", "move", "sequence", "stop", "releaseAll", "press", "reach", "reachStatus", "reachStop" }) } } },
+								{ "device", json{ { "type", "string" }, { "enum", json::array({ "keyboard", "mouse", "vrTrackedSet" }) }, { "description", "mutation/status device; omit for capabilities" } } },
+								{ "x", json{ { "type", "number" }, { "description", "mouse move: client-pixel x" } } },
+								{ "y", json{ { "type", "number" }, { "description", "mouse move: client-pixel y" } } },
+								{ "button", json{ { "type", "string" }, { "enum", json::array({ "left", "right", "middle" }) }, { "description", "mouse down/up/tap/click: button (default left)" } } },
+								{ "focusWindow", json{ { "type", "boolean" }, { "description", "mouse move: bring the game window to the foreground and set the OS cursor too (default false)" } } },
 								{ "key", json{ { "oneOf", json::array({ json{ { "type", "string" } }, json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", 258 } } }) }, { "description", "down/up/tap: documented key name, raw DirectInput scancode (1-255), or mouse button code (256-258 = mouseLeft / mouseRight / mouseMiddle)" } } },
 								{ "owner", json{ { "type", "string" }, { "minLength", 1 }, { "maxLength", 128 }, { "description", "stable task/session owner; defaults to MCP session id or rest:anonymous" } } },
-								{ "durationMs", json{ { "type", "integer" }, { "minimum", 10 }, { "maximum", 5000 }, { "description", "tap duration (default 50); sequence tap/wait event duration" } } },
+								{ "durationMs", json{ { "type", "integer" }, { "minimum", 10 }, { "maximum", 10000 }, { "description", "keyboard: tap duration (default 50, max 5000); sequence tap/wait event duration. vrTrackedSet press: how long the buttons / stick stay held (default 100)" } } },
 								{ "maxHoldMs", json{ { "type", "integer" }, { "minimum", 100 }, { "maximum", kMaximumMaxHoldMs }, { "description", "down safety lease (default 5000); automatic up at expiry" } } },
 								{ "force", json{ { "type", "boolean" }, { "description", "internal cleanup only; external true is rejected" } } },
 								{ "all", json{ { "type", "boolean" }, { "description", "internal cleanup only; external true is rejected" } } },
 								{ "events", json{ { "type", "array" }, { "minItems", 1 }, { "maxItems", kMaximumSequenceEvents }, { "description", "sequence: balanced [{action:tap|down|up|wait,key?,durationMs?,afterMs?}]" }, { "items", json{ { "type", "object" } } } } },
 								{ "frames", json{ { "type", "array" }, { "minItems", 1 }, { "maxItems", kMaximumVRTrackedFrames }, { "description", "vrTrackedSet sequence: monotonic atomic frames; each requires tMs, originCode, hmd, left, right; controller objects carry packetNumber/pressed/touched/five axes" }, { "items", json{ { "type", "object" } } } } },
 								{ "tailMs", json{ { "type", "integer" }, { "minimum", 10 }, { "maximum", 1000 }, { "description", "vrTrackedSet sequence: final-state visibility before automatic release (default 50ms)" } } },
-								{ "controlToken", json{ { "type", "string" }, { "description", "vrTrackedSet stop/releaseAll: opaque token returned by sequence start" } } },
+								{ "controlToken", json{ { "type", "string" }, { "description", "vrTrackedSet stop/releaseAll: opaque token returned by sequence start. sequence: the running sequence's token replaces its frames in place" } } },
 								{ "surviveLifecycle", json{ { "type", "boolean" }, { "description", "internal recording replay only; external true is rejected" } } },
-								{ "hands", json{ { "type", "object" }, { "description", "reach: {left?:{node,front?,offset?:[x,y,z]}, right?:{...}} - put that hand node-relative: next to a node of the player, front world units in front of it along the facing, plus a world offset; at least one hand" } } },
+								{ "hand", json{ { "type", "string" }, { "enum", json::array({ "left", "right" }) }, { "description", "press: the physical controller" } } },
+								{ "buttons", json{ { "type", "array" }, { "minItems", 1 }, { "items", json{ { "type", "string" }, { "enum", json::array({ "trigger", "grip", "a", "b", "thumbstick" }) } } }, { "description", "press: buttons held together (trigger, grip, a = A/X, b = B/Y, thumbstick = click); optional with stick" } } },
+								{ "stick", json{ { "type", "array" }, { "minItems", 2 }, { "maxItems", 2 }, { "items", json{ { "type", "number" }, { "minimum", -1 }, { "maximum", 1 } } }, { "description", "press: thumbstick deflection [x, y] held for durationMs (x right, y up), then back to center; touches the stick, does not click it" } } },
+								{ "delayMs", json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", 30000 }, { "description", "press: wait this long before pressing (default 0)" } } },
+								{ "hands", json{ { "type", "object" }, { "description", "reach: {left?:{node,root?,front?,offset?:[x,y,z]}, right?:{...}} - put that hand node-relative: next to a node of the player, front world units in front of it along the facing, plus a world offset; root 'firstPerson' searches the first-person 3D instead of the body ('player', default); at least one hand" } } },
+								{ "calibrate", json{ { "type", "string" }, { "enum", json::array({ "auto", "always" }) }, { "description", "reach: 'auto' (default) reuses a hand's calibration while the player's yaw is unchanged; 'always' measures it again" } } },
 								{ "head", json{ { "type", "object" }, { "description", "reach: {lookAt:'hands'|<node name>, back?:0.5, up?:0.3, pos?:[x,y,z], eyeHeight?} - aim the HMD at the hands or a node from back meters behind and up meters above it (tracking space), or from pos; eyeHeight (0..3) sets the head's height in tracking meters, e.g. 1.6 to frame low targets from standing height" } } },
 								{ "holdMs", json{ { "type", "integer" }, { "minimum", 100 }, { "maximum", 1798000 }, { "description", "reach: how long to hold the final pose (default 10000)" } } },
 								{ "iterations", json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", 10 }, { "description", "reach: correction passes (default 4)" } } },

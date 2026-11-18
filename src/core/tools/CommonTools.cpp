@@ -1,18 +1,22 @@
 #include "core/tools/CommonTools.h"
 
 #include "core/EventBus.h"
+#include "core/FilesLogic.h"
 #include "core/Host.h"
 #include "core/Json.h"
 #include "core/Log.h"
+#include "core/MainThread.h"
 #include "core/tools/Memory.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 // Tools that need nothing from the game. They register identically on every
@@ -312,6 +316,247 @@ namespace dvb::tools
 				{ "lines", keep }
 			};
 		}
+
+		constexpr std::uintmax_t kMaxFileBytes = 16u * 1024 * 1024;
+		constexpr std::size_t    kMaxListed = 10000;
+
+		/// The folder a root names, absolute: the game's Data folder as the game sees it, or
+		/// Documents/My Games/<game>, the folder above the extender's log folder.
+		std::filesystem::path RootDir(FilesLogic::Root a_root)
+		{
+			if (a_root == FilesLogic::Root::Data) {
+				std::error_code ec;
+				auto            dir = std::filesystem::absolute("Data", ec);
+				if (ec)
+					throw ToolError(500, "files: cannot resolve the game's Data folder: " + ec.message());
+				return dir;
+			}
+			const auto logDir = host::LogDir();
+			if (logDir.empty())
+				throw ToolError(500, "files: the script extender did not resolve Documents/My Games/<game>");
+			return logDir.parent_path();
+		}
+
+		/// The first a_count segments of a relative path, under a_root. The segments are UTF-8.
+		std::filesystem::path UnderRoot(const std::filesystem::path& a_root, const std::vector<std::string>& a_segments, std::size_t a_count)
+		{
+			auto path = a_root;
+			for (std::size_t i = 0; i < std::min(a_count, a_segments.size()); ++i)
+				path /= std::u8string_view(reinterpret_cast<const char8_t*>(a_segments[i].data()), a_segments[i].size());
+			return path;
+		}
+
+		/// A file's last write time in milliseconds since the Unix epoch, 0 when it can't be read.
+		std::int64_t ModifiedMs(const std::filesystem::path& a_path)
+		{
+			std::error_code ec;
+			const auto      time = std::filesystem::last_write_time(a_path, ec);
+			if (ec)
+				return 0;
+			return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::clock_cast<std::chrono::system_clock>(time).time_since_epoch()).count();
+		}
+
+		/// The segments of the 'path' argument, refused with a 400 that says why.
+		std::vector<std::string> PathArgument(const json& a_args, bool a_allowWildcards)
+		{
+			const auto path = a_args.value("path", std::string{});
+			auto       split = FilesLogic::SplitRelativePath(path, a_allowWildcards);
+			if (!split.error.empty())
+				throw ToolError(400, "files: " + split.error);
+			return std::move(split.segments);
+		}
+
+		/// Every file under the root whose path matches the glob, sorted by path. The walk
+		/// starts at the glob's folders with no wildcard, and goes only as deep as the glob
+		/// reaches unless it has a "**". A walk that fails partway returns what it found with
+		/// 'incomplete' and the reason; a file whose size can't be read has null 'bytes'.
+		json ListFiles(const std::filesystem::path& a_root, const std::vector<std::string>& a_pattern)
+		{
+			struct Listed
+			{
+				std::string                   path;
+				std::optional<std::uintmax_t> bytes;
+				std::int64_t                  modifiedMs;
+			};
+
+			const auto prefix = FilesLogic::LiteralPrefixLength(a_pattern);
+			const auto base = UnderRoot(a_root, a_pattern, prefix);
+			const bool anyDepth = std::ranges::find(a_pattern, std::string("**")) != a_pattern.end();
+			const auto depth = static_cast<int>(a_pattern.size() - prefix);
+
+			std::vector<Listed> listed;
+			bool                capped = false;
+			std::error_code     ec;
+			const bool          isDirectory = std::filesystem::is_directory(base, ec);
+			// MSVC reports a missing folder as an error; it is a glob that matches nothing.
+			if (ec == std::errc::no_such_file_or_directory)
+				ec.clear();
+			if (isDirectory) {
+				for (auto it = std::filesystem::recursive_directory_iterator(base, std::filesystem::directory_options::skip_permission_denied, ec);
+					!ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+					if (!anyDepth && it.depth() + 1 >= depth)
+						it.disable_recursion_pending();
+					std::error_code fileEc;
+					if (!it->is_regular_file(fileEc))
+						continue;
+					std::vector<std::string> segments(a_pattern.begin(), a_pattern.begin() + static_cast<std::ptrdiff_t>(prefix));
+					for (const auto& part : it->path().lexically_relative(base))
+						segments.push_back(Utf8(part));
+					if (!FilesLogic::GlobMatch(a_pattern, segments))
+						continue;
+					if (listed.size() == kMaxListed) {
+						capped = true;
+						break;
+					}
+					const auto bytes = it->file_size(fileEc);
+					listed.push_back({ FilesLogic::JoinSegments(segments, segments.size()), fileEc ? std::nullopt : std::optional(bytes), ModifiedMs(it->path()) });
+				}
+			}
+			std::ranges::sort(listed, {}, &Listed::path);
+
+			json files = json::array();
+			for (const auto& file : listed)
+				files.push_back(json{ { "path", file.path }, { "bytes", file.bytes ? json(static_cast<std::uint64_t>(*file.bytes)) : json(nullptr) }, { "modifiedMs", file.modifiedMs } });
+			json out{ { "count", files.size() }, { "files", std::move(files) } };
+			if (capped)
+				out["capped"] = true;
+			if (ec) {
+				out["incomplete"] = true;
+				out["reason"] = ec.message();
+			}
+			return out;
+		}
+
+		json FilesHandler(const json& a_args, const ToolContext&)
+		{
+			const auto action = a_args.value("action", std::string{});
+			const auto rootName = a_args.value("root", std::string{});
+			const auto root = FilesLogic::ParseRoot(rootName);
+			if (!root)
+				throw ToolError(400, "files: 'root' must be 'data' or 'mygames'");
+			const auto rootDir = RootDir(*root);
+
+			if (action == "list") {
+				auto out = ListFiles(rootDir, PathArgument(a_args, true));
+				out["root"] = rootName;
+				out["rootDir"] = Utf8(rootDir);
+				return out;
+			}
+
+			const auto segments = PathArgument(a_args, false);
+			const auto relative = FilesLogic::JoinSegments(segments, segments.size());
+			const auto file = UnderRoot(rootDir, segments, segments.size());
+			const auto encoding = a_args.value("encoding", std::string("text"));
+			if (encoding != "text" && encoding != "base64")
+				throw ToolError(400, "files: 'encoding' must be 'text' or 'base64'");
+			json            out{ { "root", rootName }, { "path", relative } };
+			std::error_code ec;
+
+			if (action == "read") {
+				if (!std::filesystem::is_regular_file(file, ec))
+					throw ToolError(404, "files: no file '" + relative + "' under " + rootName);
+				const auto bytes = std::filesystem::file_size(file, ec);
+				if (ec)
+					throw ToolError(500, "files: cannot read the size of '" + relative + "': " + ec.message());
+				if (bytes > kMaxFileBytes)
+					throw ToolError(422, std::format("files: '{}' has {} bytes, more than the {} a read returns", relative, bytes, kMaxFileBytes));
+				std::ifstream in(file, std::ios::binary);
+				if (!in)
+					throw ToolError(500, "files: cannot open '" + relative + "'");
+				std::string content(static_cast<std::size_t>(bytes), '\0');
+				in.read(content.data(), static_cast<std::streamsize>(content.size()));
+				content.resize(static_cast<std::size_t>(in.gcount()));
+				if (encoding == "text" && !FilesLogic::IsUtf8(content))
+					throw ToolError(422, "files: '" + relative + "' is not UTF-8 text; read it with encoding='base64'");
+				out["bytes"] = content.size();
+				out["modifiedMs"] = ModifiedMs(file);
+				out["encoding"] = encoding;
+				out["content"] = encoding == "base64" ? FilesLogic::EncodeBase64(content) : std::move(content);
+				return out;
+			}
+
+			if (action == "write") {
+				if (!a_args.contains("content") || !a_args["content"].is_string())
+					throw ToolError(400, "files: a write needs 'content', a string");
+				const auto& text = a_args["content"].get_ref<const std::string&>();
+				std::string content;
+				if (encoding == "base64") {
+					auto decoded = FilesLogic::DecodeBase64(text);
+					if (!decoded)
+						throw ToolError(400, "files: 'content' is not base64");
+					content = std::move(*decoded);
+				} else {
+					content = text;
+				}
+				if (const auto refusal = FilesLogic::ExecutableRefusal(segments.back(), content); !refusal.empty())
+					throw ToolError(403, refusal);
+				if (content.size() > kMaxFileBytes)
+					throw ToolError(422, std::format("files: {} bytes is more than the {} a write takes", content.size(), kMaxFileBytes));
+				if (std::filesystem::is_directory(file, ec))
+					throw ToolError(409, "files: '" + relative + "' is a folder");
+				const bool existed = std::filesystem::exists(file, ec);
+				std::filesystem::create_directories(file.parent_path(), ec);
+				if (ec)
+					throw ToolError(500, "files: cannot create the folder of '" + relative + "': " + ec.message());
+				{
+					std::ofstream outFile(file, std::ios::binary | std::ios::trunc);
+					if (!outFile || !outFile.write(content.data(), static_cast<std::streamsize>(content.size())))
+						throw ToolError(500, "files: cannot write '" + relative + "'");
+				}
+				dlog::info("files: wrote {} bytes to {} '{}'", content.size(), rootName, relative);
+				out["bytes"] = content.size();
+				out["created"] = !existed;
+				out["modifiedMs"] = ModifiedMs(file);
+				return out;
+			}
+
+			if (action == "delete") {
+				if (!std::filesystem::exists(file, ec)) {
+					out["deleted"] = false;
+					return out;
+				}
+				if (!std::filesystem::is_regular_file(file, ec))
+					throw ToolError(409, "files: '" + relative + "' is not a file; only a file is deleted");
+				if (!std::filesystem::remove(file, ec) || ec)
+					throw ToolError(500, "files: cannot delete '" + relative + "': " + ec.message());
+				dlog::info("files: deleted {} '{}'", rootName, relative);
+				out["deleted"] = true;
+				return out;
+			}
+
+			throw ToolError(400, "files: unknown action '" + action + "' (list|read|write|delete)");
+		}
+
+		// the longest quit watchdog: ten minutes
+		constexpr std::int64_t kMaxKillAfterMs = 600000;
+
+		/**
+		 * Asks the game to quit on the main thread and answers before it goes down. With
+		 * killAfterMs, a detached thread terminates the process if it still runs by then:
+		 * a shutdown that hangs has usually stopped this listener, so no later call could.
+		 */
+		json QuitHandler(const json& a_args, const ToolContext&)
+		{
+			const json& raw = a_args.contains("killAfterMs") ? a_args["killAfterMs"] : json(0);
+			if (!raw.is_number_integer() || raw.get<std::int64_t>() < 0 || raw.get<std::int64_t>() > kMaxKillAfterMs)
+				throw ToolError(400, std::format("quit: 'killAfterMs' must be an integer from 0 to {}", kMaxKillAfterMs));
+			const auto killAfterMs = raw.get<std::int64_t>();
+
+			const auto refused = MainThread::RunAndWait([]() -> json { return host::RequestQuit(); }).get<std::string>();
+			if (!refused.empty())
+				throw ToolError(500, "quit: " + refused);
+
+			if (killAfterMs > 0) {
+				std::thread([killAfterMs] {
+					std::this_thread::sleep_for(std::chrono::milliseconds(killAfterMs));
+					dlog::warn("quit: still running {} ms after the quit; terminating the process", killAfterMs);
+					::TerminateProcess(::GetCurrentProcess(), 1);
+				}).detach();
+			}
+			const auto pid = static_cast<int>(::GetCurrentProcessId());
+			dlog::info("quit: requested (pid {}, killAfterMs {})", pid, killAfterMs);
+			return json{ { "pid", pid }, { "quitting", true }, { "killAfterMs", killAfterMs } };
+		}
 	}
 
 	void SetAllowMemoryWrites(bool a_allow)
@@ -389,6 +634,56 @@ namespace dvb::tools
 			};
 			log.readOnly = true;
 			a_registry.Register(std::move(log), &LogHandler);
+		}
+
+		{
+			ToolDescriptor files;
+			files.name = "files";
+			files.description =
+				"List, read, write and delete files under two roots: 'data', the game's Data folder as "
+				"the game sees it, so a mod manager's virtual files (MO2's mods and overwrite) are in "
+				"it and a write lands where the game's own write would; and 'mygames', "
+				"Documents/My Games/<game>. 'path' is relative to the root, '/' or '\\' separated; "
+				"one that leaves it (absolute, a drive, '..') is refused. action='list' takes a glob "
+				"('*' and '?' in a name, '**' for any folders, case ignored) and returns { count, files: "
+				"[{ path, bytes, modifiedMs }], capped } sorted by path, at most 10000; a walk that "
+				"fails partway adds 'incomplete' and 'reason'. 'read' returns "
+				"{ path, bytes, modifiedMs, encoding, content }: 'text' (default) for UTF-8, 'base64' "
+				"for any bytes, so a backup round-trips exactly. 'write' creates or replaces the file "
+				"and its folders from 'content' in 'encoding', and says whether it 'created' it; it "
+				"never writes native code (.dll, .exe, .asi, .bat, .cmd, .ps1, or bytes starting 'MZ'). "
+				"'delete' removes one file; 'deleted' is false when there was none. Files up to 16 MB. "
+				"Runs on the listener thread, so it answers at the main menu and while the game is "
+				"stalled.";
+			files.inputSchema = json{
+				{ "type", "object" },
+				{ "properties", json{
+									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "read", "write", "delete" }) } } },
+									{ "root", json{ { "type", "string" }, { "enum", json::array({ "data", "mygames" }) } } },
+									{ "path", json{ { "type", "string" }, { "description", "relative to the root; list: a glob, e.g. 'MCM/Settings/*.ini' or 'Mods_Config/**'" } } },
+									{ "content", json{ { "type", "string" }, { "description", "write: the file's content, in 'encoding'" } } },
+									{ "encoding", json{ { "type", "string" }, { "enum", json::array({ "text", "base64" }) }, { "description", "read, write: default 'text' (UTF-8)" } } } } },
+				{ "required", json::array({ "action", "root", "path" }) }
+			};
+			a_registry.Register(std::move(files), &FilesHandler);
+		}
+
+		{
+			ToolDescriptor quit;
+			quit.name = "quit";
+			quit.description =
+				"Quit the game to the desktop through the engine's own shutdown, the path the console's qqq "
+				"takes: no save, no prompt. Answers { pid, quitting: true, killAfterMs } at once; the game goes "
+				"down on a later frame, so this port stops answering soon after. To know it is gone, wait for "
+				"process 'pid' to exit, not for the port: shutdown takes seconds and can hang. killAfterMs > 0 "
+				"arms a watchdog that terminates the process if it still runs that many ms after the call, for "
+				"a shutdown that hangs (it skips whatever cleanup was left); 0 (default) never kills.";
+			quit.inputSchema = json{
+				{ "type", "object" },
+				{ "properties", json{
+									{ "killAfterMs", json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", kMaxKillAfterMs }, { "description", "terminate the process if it still runs this long after the call; default 0, never" } } } } }
+			};
+			a_registry.Register(std::move(quit), &QuitHandler);
 		}
 	}
 }

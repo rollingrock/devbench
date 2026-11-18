@@ -1,8 +1,8 @@
 # One devbench, several games
 
-_Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.32.0.
+_Status: `main` of the `rollingrock/devbench` fork, merged with upstream through 1.36.0.
 Both targets build — Fallout 4 (CMake) and Skyrim (xmake) — and the host-independent
-unit tests pass. Written 2026-08-15; status updated 2026-11-07._
+unit tests pass. Written 2026-08-15; status updated 2026-11-17._
 
 This is the working note behind the split, and the thing to read before reviewing the
 branch. It answers three questions in order: **why a fork and not a port**, **where the
@@ -60,6 +60,12 @@ core/Log.h         dvb::dlog -> a sink the platform installs at load
 core/MainThread.h  RunAndWait / LastCompletedFrame / PendingTasks
 core/GameState.h   CurrentFrame()
 ```
+
+Later seams follow the same pattern: `core/gfx/Device.h` for the graphics device and
+`core/VRHost.h` for OpenVR (interfaces, controller indices, the hand and node reads Pose
+needs, each platform's extra input actions), which is what lets VR input live in the core
+for both games. How each game places the hands stays its own: Fallout's Pose is core code
+behind the seam, Skyrim's calibrated Reach is Skyrim platform code.
 
 Free functions, one definition per platform, resolved at link time. **Not** an `IHost`
 vtable — that choice is load-bearing: an interface object would have meant touching every

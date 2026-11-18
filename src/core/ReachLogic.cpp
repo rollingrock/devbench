@@ -14,9 +14,18 @@ namespace dvb::ReachLogic
 		constexpr double kDetEpsilon = 1e-6;
 		constexpr long   kFrameStepMs = 1000;
 		constexpr long   kCalibrationSettleMs = 2600;
-		constexpr int    kBlendFrames = 6;
-		constexpr long   kBlendStepMs = 300;
-		constexpr long   kBlendDurationMs = (kBlendFrames - 1) * kBlendStepMs;
+		constexpr long   kBlendStepMs = 10;
+		constexpr long   kBlendDurationMs = kApproachBlendMs;
+		constexpr int    kBlendFrames = static_cast<int>(kBlendDurationMs / kBlendStepMs) + 1;
+
+		/**
+		 * Smoothstep ease-in-out over [0,1]: the hand starts and stops at rest the way a real
+		 * reach does, instead of jerking to full speed on the first frame.
+		 */
+		double EaseInOut(double a_t)
+		{
+			return a_t * a_t * (3.0 - 2.0 * a_t);
+		}
 
 		std::string FormatNumber(double a_value)
 		{
@@ -272,6 +281,13 @@ namespace dvb::ReachLogic
 					a_error = "'" + path + ".node' must be a non-empty string of at most 128 characters";
 					return std::nullopt;
 				}
+				if (hand.contains("root") && !hand["root"].is_null()) {
+					if (!hand["root"].is_string() || (hand["root"] != "player" && hand["root"] != "firstPerson")) {
+						a_error = "'" + path + ".root' must be 'player' or 'firstPerson'";
+						return std::nullopt;
+					}
+					target.root = hand["root"].get<std::string>();
+				}
 				if (hand.contains("front") && !hand["front"].is_null()) {
 					if (!ReadNumber(hand["front"], path + ".front", kFrontMin, kFrontMax, target.front, a_error)) {
 						return std::nullopt;
@@ -380,6 +396,15 @@ namespace dvb::ReachLogic
 			}
 		}
 
+		if (a_args.contains("calibrate") && !a_args["calibrate"].is_null()) {
+			const json& calibrate = a_args["calibrate"];
+			if (!calibrate.is_string() || (calibrate != "auto" && calibrate != "always")) {
+				a_error = "'calibrate' must be 'auto' or 'always'";
+				return std::nullopt;
+			}
+			request.recalibrate = calibrate == "always";
+		}
+
 		if (!request.left && !request.right) {
 			a_error = "'hands' must contain at least one of 'left'/'right'";
 			return std::nullopt;
@@ -408,7 +433,7 @@ namespace dvb::ReachLogic
 		return frame;
 	}
 
-	json CalibrationFrames(bool a_rightHand, const Pose& a_hmd, const Vec3& a_restTracking, const Vec3& a_otherHandTracking, double a_stepMeters)
+	json CalibrationFrames(Hand a_hand, const Pose& a_hmd, const Vec3& a_restTracking, const Vec3& a_otherHandTracking, double a_stepMeters)
 	{
 		json       frames = json::array();
 		int        packet = 1;
@@ -423,8 +448,8 @@ namespace dvb::ReachLogic
 			const Pose moving = Upright(Add(a_restTracking, legs[leg]));
 			for (int k = 0; k < 4; ++k) {
 				const long  tMs = static_cast<long>(leg) * kCalibrationLegMs + static_cast<long>(k) * kFrameStepMs;
-				const Pose& left = a_rightHand ? other : moving;
-				const Pose& right = a_rightHand ? moving : other;
+				const Pose& left = a_hand == Hand::Right ? other : moving;
+				const Pose& right = a_hand == Hand::Right ? moving : other;
 				frames.push_back(MakeFrame(tMs, packet, a_hmd, left, right));
 				++packet;
 			}
@@ -447,7 +472,7 @@ namespace dvb::ReachLogic
 		json frames = json::array();
 		int  packet = 1;
 		for (int k = 0; k < kBlendFrames; ++k) {
-			const double t = static_cast<double>(k) / static_cast<double>(kBlendFrames - 1);
+			const double t = EaseInOut(static_cast<double>(k) / static_cast<double>(kBlendFrames - 1));
 			const Vec3   left = Add(a_leftStart, Scale(Sub(a_leftFinal, a_leftStart), t));
 			const Vec3   right = Add(a_rightStart, Scale(Sub(a_rightFinal, a_rightStart), t));
 			const long   tMs = static_cast<long>(k) * kBlendStepMs;
@@ -517,10 +542,31 @@ namespace dvb::ReachLogic
 			const double worst = std::max(a_progress.left ? Norm(a_progress.left->error) : 0.0, a_progress.right ? Norm(a_progress.right->error) : 0.0);
 			result["worstErrorDistance"] = round2(worst);
 		}
+		if (!a_progress.calibrationLeft.empty() || !a_progress.calibrationRight.empty()) {
+			json calibration = json::object();
+			if (!a_progress.calibrationLeft.empty())
+				calibration["left"] = a_progress.calibrationLeft;
+			if (!a_progress.calibrationRight.empty())
+				calibration["right"] = a_progress.calibrationRight;
+			result["calibration"] = std::move(calibration);
+		}
 		if (!a_progress.error.empty()) {
 			result["error"] = a_progress.error;
 		}
 		return result;
+	}
+
+	/**
+	 * True when the yaws differ by at most kCalibrationYawToleranceRad, compared around the
+	 * circle so -pi and +pi are the same heading.
+	 */
+	bool CalibrationReusable(double a_measuredYaw, double a_yaw)
+	{
+		constexpr double kTwoPi = 2.0 * 3.14159265358979323846;
+		double           diff = std::fmod(std::abs(a_yaw - a_measuredYaw), kTwoPi);
+		if (diff > kTwoPi / 2.0)
+			diff = kTwoPi - diff;
+		return diff <= kCalibrationYawToleranceRad;
 	}
 
 	bool Converged(double a_worstErrorUnits, double a_toleranceUnits)

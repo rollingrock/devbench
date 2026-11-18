@@ -23,20 +23,22 @@ if (!baseRef) {
 // shared core (ping, memory, log, ...) appear in each game's fallback.
 // GfxTools.cpp is core code but NOT shared: only a platform that implements the
 // graphics seam registers it (Fallout today), so it feeds only those lists.
-const SHARED_FILES = [
-  "src/core/HostApi.cpp",
-  "src/core/tools/CommonTools.cpp",
-];
+const SHARED_FILES = ["src/core/HostApi.cpp", "src/core/tools/CommonTools.cpp"];
 const FALLBACKS = {
   "bridge/src/tools-fallback.json": [
     "src/platform/skyrim/Tools.cpp",
     "src/platform/skyrim/Capture.cpp",
+    "src/platform/skyrim/Map.cpp",
+    "src/platform/skyrim/Gfx.cpp",
+    "src/platform/skyrim/ModalWatch.cpp",
     "src/platform/skyrim/KeyboardInput.cpp",
     ...SHARED_FILES,
   ],
   "bridge/src/tools-fallback-fallout4.json": [
     "src/platform/fallout4/Tools_Fallout4.cpp",
     "src/platform/fallout4/Nodes_Fallout4.cpp",
+    "src/platform/fallout4/Input_Fallout4.cpp",
+    "src/platform/fallout4/Player_Fallout4.cpp",
     "src/core/tools/GfxTools.cpp",
     ...SHARED_FILES,
   ],
@@ -48,6 +50,10 @@ const DESCRIPTOR_FILE = "src/core/ToolRegistry.h";
 const DESCRIPTOR_TOKENS =
   /\b(DefaultInputSchema|ToolDescriptor|inputSchema|readOnly)\b/;
 const STRING_LITERAL = /"(?:[^"\\]|\\.){3,}"/;
+// Runtime code, not tool text: an #include, a result field built from a call
+// (`{ "key", Fn(x) },`), or a result field assigned from a non-literal (`j["key"] = x;`).
+const RESULT_FIELD =
+  /^(?:#include\s|\{\s*"\w+",\s*[^"]*\([^"]*\},?$|\w+\["\w+"\]\s*=\s*[^"]*;$)/;
 
 // Structural validation, independent of whether a registration file changed --
 // the file-touched check below only proves the file moved, not that it's sane.
@@ -114,7 +120,9 @@ let failed = false;
 for (const [FALLBACK_FILE, sources] of Object.entries(FALLBACKS)) {
   const touched = [
     ...sources.filter((f) =>
-      changedCodeLines(f).some((l) => STRING_LITERAL.test(l)),
+      changedCodeLines(f).some(
+        (l) => STRING_LITERAL.test(l) && !RESULT_FIELD.test(l),
+      ),
     ),
     ...(descriptorChanged ? [DESCRIPTOR_FILE] : []),
   ];

@@ -2,6 +2,8 @@
 
 #include "core/VRInputState.h"
 
+#include <cmath>
+
 using dvb::json;
 using dvb::ParseBoundedIntegerArgument;
 using dvb::ParseVRTrackedInputFrames;
@@ -191,6 +193,36 @@ TEST_CASE("VR sequence stop authority is token and owner scoped")
 		  VRSequenceStopAccess::kAllowed);
 }
 
+TEST_CASE("VR sequence replace needs a running sequence, its owner and its token")
+{
+	VRSequenceTransaction state;
+	CHECK(!state.CanReplace("owner", "secret"));
+	CHECK(state.Begin("owner", "secret", false));
+	const auto generation = state.Generation();
+	CHECK(!state.CanReplace("owner", "secret"));
+	CHECK(state.MarkIndicesApplied(generation));
+	CHECK(state.Commit(generation));
+	CHECK(state.CanReplace("owner", "secret"));
+	CHECK(!state.CanReplace("owner", "wrong"));
+	CHECK(!state.CanReplace("owner", ""));
+	CHECK(!state.CanReplace("other", "secret"));
+	CHECK(state.Generation() == generation);
+
+	CHECK(state.ClaimFinish(generation) == VRSequenceFinishAction::kRestore);
+	CHECK(!state.CanReplace("owner", "secret"));
+}
+
+TEST_CASE("VR sequence replace is refused once lifecycle cleanup cancels it")
+{
+	VRSequenceTransaction state;
+	CHECK(state.Begin("owner", "secret", false));
+	const auto generation = state.Generation();
+	CHECK(state.MarkIndicesApplied(generation));
+	CHECK(state.Commit(generation));
+	state.CancelForLifecycle();
+	CHECK(!state.CanReplace("owner", "secret"));
+}
+
 TEST_CASE("only internal replay may survive lifecycle cleanup")
 {
 	VRSequenceTransaction state;
@@ -199,4 +231,80 @@ TEST_CASE("only internal replay may survive lifecycle cleanup")
 	CHECK(decision.present);
 	CHECK(decision.preserved);
 	CHECK(state.Starting());
+}
+
+TEST_CASE("press maps button names to OpenVR bits, touch and analog axes")
+{
+	const auto press = dvb::ParseVRPress(json{ { "hand", "left" }, { "buttons", json::array({ "trigger", "a" }) } });
+	CHECK(!press.right);
+	CHECK(press.pressed == ((1ull << 33) | (1ull << 7)));
+	CHECK(press.touched == press.pressed);
+	CHECK(press.axes[2].has_value());
+	CHECK(!press.axes[0].has_value());
+	CHECK(press.durationMs == dvb::kDefaultPressMs);
+	CHECK(press.delayMs == 0);
+}
+
+TEST_CASE("press rejects a missing hand, unknown buttons and out-of-range timing")
+{
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "buttons", json::array({ "trigger" }) } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "middle" }, { "buttons", json::array({ "trigger" }) } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "right" }, { "buttons", json::array() } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "right" }, { "buttons", json::array({ "jump" }) } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "right" }, { "buttons", json::array({ "grip" }) }, { "durationMs", 5 } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "right" }, { "buttons", json::array({ "grip" }) }, { "delayMs", -1 } }));
+}
+
+TEST_CASE("press takes a stick alone or with buttons, on axis 0 with the stick touched")
+{
+	const auto stick = dvb::ParseVRPress(json{ { "hand", "right" }, { "stick", json::array({ 0.0, -1.0 }) } });
+	CHECK(stick.right);
+	CHECK(stick.stick.has_value());
+	CHECK(stick.pressed == 0);
+	CHECK(stick.touched == (1ull << 32));
+	CHECK(std::abs(*stick.axes[0]) <= 1e-6f);
+	CHECK(std::abs(*stick.axes[1] + 1.0f) <= 1e-6f);
+	CHECK(stick.buttons.empty());
+
+	const auto both = dvb::ParseVRPress(json{ { "hand", "left" }, { "buttons", json::array({ "trigger" }) }, { "stick", json::array({ 0.5, 0 }) } });
+	CHECK(both.pressed == (1ull << 33));
+	CHECK(both.touched == ((1ull << 33) | (1ull << 32)));
+	CHECK(std::abs(*both.axes[0] - 0.5f) <= 1e-6f);
+	CHECK(std::abs(*both.axes[2] - 1.0f) <= 1e-6f);
+}
+
+TEST_CASE("press rejects a stick outside [-1, 1], a malformed stick and neither buttons nor stick")
+{
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "left" } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "left" }, { "stick", json::array({ 1.5, 0 }) } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "left" }, { "stick", json::array({ 0 }) } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "left" }, { "stick", json::array({ "up", 0 }) } }));
+	CHECK_THROWS(dvb::ParseVRPress(json{ { "hand", "left" }, { "stick", json::array({ 0, 1 }) }, { "buttons", json::array() } }));
+}
+
+TEST_CASE("a stick press replaces the frame's stick and leaves its other axes")
+{
+	dvb::VRControllerState state;
+	state.axes[0] = 0.3f;
+	state.axes[2] = 0.7f;
+	const auto out = dvb::ApplyVRPress(state, dvb::ParseVRPress(json{ { "hand", "left" }, { "stick", json::array({ -1, 0.25 }) } }));
+	CHECK(std::abs(out.axes[0] + 1.0f) <= 1e-6f);
+	CHECK(std::abs(out.axes[1] - 0.25f) <= 1e-6f);
+	CHECK(std::abs(out.axes[2] - 0.7f) <= 1e-6f);
+	CHECK(out.pressed == 0);
+}
+
+TEST_CASE("press lays its state over the frame's controller state")
+{
+	dvb::VRControllerState state;
+	state.packetNumber = 41;
+	state.pressed = 1ull << 1;
+	state.axes[0] = 0.5f;
+	const auto press = dvb::ParseVRPress(json{ { "hand", "right" }, { "buttons", json::array({ "grip" }) } });
+	const auto out = dvb::ApplyVRPress(state, press);
+	CHECK(out.pressed == ((1ull << 1) | (1ull << 2)));
+	CHECK(out.touched == (1ull << 2));
+	CHECK(std::abs(out.axes[0] - 0.5f) <= 1e-6f);
+	CHECK(std::abs(out.axes[4] - 1.0f) <= 1e-6f);
+	CHECK(out.packetNumber == 41);
 }

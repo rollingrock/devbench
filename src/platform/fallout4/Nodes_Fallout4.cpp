@@ -6,6 +6,7 @@
 #include "core/tools/Memory.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <utility>
 
@@ -708,5 +709,87 @@ namespace dvb
 		};
 		nodes.readOnly = true;
 		a_registry.Register(std::move(nodes), &NodesHandler);
+	}
+
+	/**
+	 * Finds a player node by name for Reach: a VR node slot as the nodes tool names it
+	 * (hmdNode, primaryWandNode, ...), then a node of that name in the first-person skeleton,
+	 * then in the body skeleton (player 3D, which FRIK drives). a_root "player" or
+	 * "firstPerson" searches that skeleton alone, since both have bones of the same names.
+	 * Empty or refused slots and missing skeletons are skipped. Throws ToolError(404).
+	 */
+	RE::NiAVObject* FindPlayerNode(std::string_view a_name, std::string_view a_root)
+	{
+		if (a_root.empty() && REL::Module::IsVR()) {
+			if (const Slot* slot = FindVRSlot(a_name)) {
+				if (auto* node = VRSlotRoot(*slot).node)
+					return node;
+			}
+		}
+		std::vector<Resolved> roots;
+		if (a_root.empty() || a_root == "firstPerson")
+			roots.push_back(FirstPersonRoot());
+		if (a_root.empty() || a_root == "player")
+			roots.push_back(PlayerRoot());
+		const std::string name(a_name);
+		for (const Resolved& root : roots) {
+			if (!root.node)
+				continue;
+			const Search s = SearchUnder(root.node, name, {}, 1);
+			if (!s.matches.empty())
+				return s.matches.front();
+		}
+		if (!a_root.empty())
+			throw ToolError(404, std::format("node '{}' not found in the {} skeleton", a_name, a_root == "player" ? "body" : "first-person"));
+		throw ToolError(404, std::format("node '{}' not found in the VR node table, the first-person skeleton or the body skeleton", a_name));
+	}
+
+	/**
+	 * The bLeftHandedMode:VR setting object, looked up once: the setting collections are built
+	 * at startup and not changed after, so the cached pointer stays valid and the lookup is
+	 * safe off the main thread. Null on a runtime without it (flat Fallout 4).
+	 */
+	RE::Setting* LeftHandedSetting()
+	{
+		static std::atomic<RE::Setting*> cached{ nullptr };
+		if (auto* setting = cached.load(std::memory_order_acquire))
+			return setting;
+		auto* setting = RE::GetINISetting("bLeftHandedMode:VR");
+		if (setting)
+			cached.store(setting, std::memory_order_release);
+		return setting;
+	}
+
+	/**
+	 * The game's left-handed mode (bLeftHandedMode:VR), read live: it swaps which physical
+	 * controller is the primary hand.
+	 */
+	bool LeftHandedMode()
+	{
+		auto* setting = LeftHandedSetting();
+		return setting && setting->GetBinary();
+	}
+
+	/**
+	 * The primary or secondary Wand slot's node, whichever controller drives it; the offhand's
+	 * slot is the game's secondary one.
+	 */
+	RE::NiAVObject* WandSlotNode(Role a_role)
+	{
+		const bool  primary = a_role == Role::Primary;
+		const Slot* slot = FindVRSlot(primary ? "primaryWandNode" : "secondaryWandNode");
+		auto*       node = slot ? VRSlotRoot(*slot).node : nullptr;
+		if (!node)
+			throw ToolError(503, std::format("the {} wand node is not available", primary ? "primary" : "secondary"));
+		return node;
+	}
+
+	/**
+	 * The Wand node for one physical controller. The game's primary wand follows the right
+	 * controller unless left-handed mode (bLeftHandedMode:VR) swaps them.
+	 */
+	RE::NiAVObject* WandNode(Hand a_hand)
+	{
+		return WandSlotNode(RoleOf(a_hand, LeftHandedMode()));
 	}
 }

@@ -9,17 +9,21 @@
 #include "GameEvents.h"
 #include "InputHotkeys.h"
 #include "KeyboardInput.h"
+#include "ModalWatch.h"
+#include "ReachControl.h"
 #include "Recording.h"
 #include "RecordingsMenu.h"
 #include "StallWatchdog.h"
 #include "TimeScaleControl.h"
 #include "Tools.h"
-#include "VRInput.h"
+#include "VanityCamera.h"
 #include "Version.h"
 #include "core/Config.h"
 #include "core/GameState.h"
+#include "core/GameText.h"
 #include "core/HostApi.h"
 #include "core/Server.h"
+#include "core/VRInput.h"
 #include "core/tools/CommonTools.h"
 
 #include <cstring>
@@ -96,6 +100,8 @@ namespace
 		if (a_msg->type == SKSE::MessagingInterface::kPostLoad) {
 			const dvb::Config cfg = dvb::LoadConfig();
 			ApplyLogLevel(cfg.logLevel);
+			if (cfg.disableVanityCamera)
+				dvb::VanityCamera::Install();  // independent of the server: the idle camera is a game setting
 			if (!cfg.enabled) {
 				logs::info("devbench: server disabled via config; not starting");
 			} else {
@@ -109,6 +115,7 @@ namespace
 				dvb::tools::SetAllowMemoryWrites(cfg.allowMemoryWrites);
 				g_server->Tools().SetStrictArgs(cfg.strictToolArgs);
 				dvb::RegisterCoreTools(g_server->Tools(), g_server->Events());
+				dvb::ModalWatch::Init(g_server->Tools(), g_server->Events(), cfg.autoDismissMenus);
 				dvb::Recording::SetLoadSettleMs(cfg.loadSettleMs);
 				dvb::Recording::SetDefaultIntervalMs(cfg.recordIntervalMs);
 				dvb::Recording::SetCoupling(cfg.couplingAnchorMs, cfg.couplingCellMs, cfg.cleanTransition, cfg.cleanTransitionCell);
@@ -187,9 +194,11 @@ namespace
 			// main thread, so the keyboard layer hands cleanup to a worker and returns immediately.
 			if (a_msg->type == SKSE::MessagingInterface::kPreLoadGame) {
 				dvb::ReleaseKeyboardInputForLifecycle("preLoadGame");
+				dvb::ReachControl::EndSession();  // a reach never carries into another game
 				dvb::ReleaseVRInputForLifecycle("preLoadGame");
 			} else if (a_msg->type == SKSE::MessagingInterface::kNewGame) {
 				dvb::ReleaseKeyboardInputForLifecycle("newGame");
+				dvb::ReachControl::EndSession();
 				dvb::ReleaseVRInputForLifecycle("newGame");
 			}
 
@@ -208,7 +217,7 @@ namespace
 					a_msg->type == SKSE::MessagingInterface::kSaveGame) &&
 				a_msg->data) {
 				const char* raw = static_cast<const char*>(a_msg->data);
-				std::string name(raw, strnlen(raw, 255));  // capped; never trust dataLen
+				std::string name = dvb::FromGame(std::string_view(raw, strnlen(raw, 255)));  // capped; never trust dataLen
 				if (name.size() > 4 && name.compare(name.size() - 4, 4, ".ess") == 0)
 					name.resize(name.size() - 4);  // the load tool takes the stem, not the filename
 				if (!name.empty())

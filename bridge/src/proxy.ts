@@ -21,6 +21,11 @@ export class GameUnavailableError extends Error {}
 // a call waits before treating it as unreachable rather than hanging indefinitely.
 const FETCH_TIMEOUT_MS = 30_000;
 
+// devbench's HTTP server holds one worker per open connection, idle keep-alive included,
+// and every open Claude session runs its own bridge. The tool-list poll's requests close
+// their connection so an idle bridge holds no worker between polls; tool calls keep theirs.
+const CLOSE_AFTER: RequestInit = { headers: { Connection: "close" } };
+
 function resolveBaseUrlOrThrowUnavailable(target: Target): string {
   try {
     return resolveBaseUrl(target);
@@ -56,7 +61,10 @@ export async function listTools(
   target: Target,
 ): Promise<DevbenchToolDescriptor[]> {
   const base = resolveBaseUrlOrThrowUnavailable(target);
-  const body = (await fetchJson(`${base}/api/tools`)) as DevbenchToolsResponse;
+  const body = (await fetchJson(
+    `${base}/api/tools`,
+    CLOSE_AFTER,
+  )) as DevbenchToolsResponse;
   if (!Array.isArray(body.tools)) {
     throw new Error(`devbench /api/tools response missing a "tools" array`);
   }
@@ -72,7 +80,7 @@ interface DevbenchHealth {
 /** GET /api/health: devbench's liveness probe, answered off the game's main thread. */
 export async function health(target: Target): Promise<DevbenchHealth> {
   const base = resolveBaseUrlOrThrowUnavailable(target);
-  return (await fetchJson(`${base}/api/health`)) as DevbenchHealth;
+  return (await fetchJson(`${base}/api/health`, CLOSE_AFTER)) as DevbenchHealth;
 }
 
 export async function callTool(

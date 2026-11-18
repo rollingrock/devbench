@@ -1,12 +1,10 @@
 #include "ReachControl.h"
 
-#include "VRInput.h"
+#include "core/Log.h"
 #include "core/MainThread.h"
 #include "core/ReachLogic.h"
-
-#include <RE/B/BSFixedString.h>
-#include <RE/N/NiAVObject.h>
-#include <RE/P/PlayerCharacter.h>
+#include "core/VRHost.h"
+#include "core/VRInput.h"
 
 #include <algorithm>
 #include <array>
@@ -34,16 +32,28 @@ namespace dvb::ReachControl
 		constexpr double      kCalibrationStep = 0.2;
 		constexpr long        kIterationSettleMs = 2400;
 		constexpr long        kStopPollMs = 100;
-		constexpr long        kBetweenIterationsMs = 400;
 		constexpr long        kShortHoldMs = 3000;
 		constexpr long        kSequenceTailMs = 300;
+		constexpr long        kCalibrationTailMs = 1000;
 
-		const RL::Vec3 kRestHandRight{ 0.25, 0.0, -0.3 };
-		const RL::Vec3 kRestHandLeft{ -0.25, 0.0, -0.3 };
-		const RL::Vec3 kDefaultHmd{ 0.0, 0.03, 0.0 };
+		/**
+		 * Tracking-space rest pose Reach calibrates around and returns to: the HMD 3 cm over the
+		 * origin and both controllers at the origin's height, 0.25 m to the side and 0.3 m in
+		 * front. That is the pose Skyrim's Reach has been verified with.
+		 */
+		struct RestPose
+		{
+			RL::Vec3 hmd;
+			RL::Vec3 left;
+			RL::Vec3 right;
+		};
 
-		constexpr const char* kRightHandNode = "NPC R Hand [RHnd]";
-		constexpr const char* kLeftHandNode = "NPC L Hand [LHnd]";
+		RestPose ReadRestPose()
+		{
+			constexpr double kEyeHeight = 0.03;
+			constexpr double kHandHeight = 0.0;
+			return RestPose{ { 0.0, kEyeHeight, 0.0 }, { -0.25, kHandHeight, -0.3 }, { 0.25, kHandHeight, -0.3 } };
+		}
 
 		struct Run
 		{
@@ -87,14 +97,20 @@ namespace dvb::ReachControl
 			return {};
 		}
 
-		json StartSequence(const std::string& a_owner, const json& a_frames, long a_tailMs, const ToolContext& a_ctx)
+		/**
+		 * Starts a sequence, or with a_controlToken replaces the running one in place so the
+		 * hands never fall back to the physical controllers between Reach's sequences.
+		 */
+		json StartSequence(const std::string& a_owner, const json& a_frames, long a_tailMs, const std::string& a_controlToken, const ToolContext& a_ctx)
 		{
-			const json args{
+			json args{
 				{ "action", "sequence" },
 				{ "owner", a_owner },
 				{ "frames", a_frames },
 				{ "tailMs", a_tailMs },
 			};
+			if (!a_controlToken.empty())
+				args["controlToken"] = a_controlToken;
 			return dvb::HandleVRInput(args, a_ctx);
 		}
 
@@ -109,13 +125,17 @@ namespace dvb::ReachControl
 					args["controlToken"] = a_token;
 				const json result = dvb::HandleVRInput(args, a_ctx);
 				if (result.value("restorationPending", false))
-					logs::warn("devbench: reach '{}' sequence stop left controller restoration pending", a_owner);
+					dlog::warn("devbench: reach '{}' sequence stop left controller restoration pending", a_owner);
 			} catch (const std::exception& e) {
 				// The sequence may already have expired on its own; anything else is worth a log line.
-				logs::warn("devbench: reach '{}' sequence stop failed: {}", a_owner, e.what());
+				dlog::warn("devbench: reach '{}' sequence stop failed: {}", a_owner, e.what());
 			}
 		}
 
+		/**
+		 * Owns Reach's one sequence: each Start replaces the frames of the sequence it started
+		 * before (a fresh one if that has already run out), and Stop or destruction releases it.
+		 */
 		class SequenceGuard
 		{
 		public:
@@ -134,8 +154,7 @@ namespace dvb::ReachControl
 
 			void Start(const json& a_frames, long a_tailMs)
 			{
-				Stop();
-				const json result = StartSequence(m_owner, a_frames, a_tailMs, m_ctx);
+				const json result = StartSequence(m_owner, a_frames, a_tailMs, m_active ? m_token : std::string{}, m_ctx);
 				m_token = TokenOf(result);
 				m_active = true;
 			}
@@ -157,47 +176,50 @@ namespace dvb::ReachControl
 			bool               m_active = false;
 		};
 
+		json Vec3Json(const RL::Vec3& a_v)
+		{
+			return json{ { "x", a_v.x }, { "y", a_v.y }, { "z", a_v.z } };
+		}
+
+		RL::Vec3 Vec3From(const json& a_v)
+		{
+			return RL::Vec3{ a_v.at("x").get<double>(), a_v.at("y").get<double>(), a_v.at("z").get<double>() };
+		}
+
 		double ReadPlayerYaw()
 		{
 			const json result = dvb::MainThread::RunAndWait([]() -> json {
-				auto* pc = RE::PlayerCharacter::GetSingleton();
-				if (!pc)
-					throw ToolError(503, "player is not available");
-				return json{ { "yaw", pc->GetAngleZ() } };
+				return json{ { "yaw", vrhost::PlayerYaw() } };
 			});
 			return result.at("yaw").get<double>();
 		}
 
-		RL::Vec3 ReadNodeWorld(const std::string& a_name)
+		RL::Vec3 ReadNodeWorld(const std::string& a_name, const std::string& a_root = {})
 		{
-			const json result = dvb::MainThread::RunAndWait([a_name]() -> json {
-				auto* pc = RE::PlayerCharacter::GetSingleton();
-				auto* root = pc ? pc->Get3D(false) : nullptr;
-				auto* node = root ? root->GetObjectByName(RE::BSFixedString(a_name.c_str())) : nullptr;
-				if (!node)
-					throw ToolError(404, std::format("node '{}' not found on the player", a_name));
-				const auto& t = node->world.translate;
-				return json{ { "x", t.x }, { "y", t.y }, { "z", t.z } };
-			});
-			return RL::Vec3{
-				result.at("x").get<double>(),
-				result.at("y").get<double>(),
-				result.at("z").get<double>(),
-			};
+			return Vec3From(dvb::MainThread::RunAndWait([a_name, a_root]() -> json {
+				return Vec3Json(vrhost::ReachNodeWorld(a_name, a_root));
+			}));
 		}
 
-		RL::Vec3 WorldTarget(const std::string& a_node, double a_front, const RL::Vec3& a_offset, const RL::Vec3& a_facing)
+		RL::Vec3 ReadHandWorld(Hand a_hand)
 		{
-			const RL::Vec3 node = ReadNodeWorld(a_node);
-			return RL::Add(node, RL::Add(RL::Scale(a_facing, a_front), a_offset));
+			return Vec3From(dvb::MainThread::RunAndWait([a_hand]() -> json {
+				return Vec3Json(vrhost::ReachHandWorld(a_hand));
+			}));
 		}
 
-		std::optional<RL::HandProgress> MeasureHand(const std::optional<RL::HandTarget>& a_target, const char* a_handNode, const RL::Vec3& a_facing)
+		RL::Vec3 WorldTarget(const RL::HandTarget& a_target, const RL::Vec3& a_facing)
+		{
+			const RL::Vec3 node = ReadNodeWorld(a_target.node, a_target.root);
+			return RL::Add(node, RL::Add(RL::Scale(a_facing, a_target.front), a_target.offset));
+		}
+
+		std::optional<RL::HandProgress> MeasureHand(const std::optional<RL::HandTarget>& a_target, Hand a_hand, const RL::Vec3& a_facing)
 		{
 			if (!a_target)
 				return std::nullopt;
-			const RL::Vec3 hand = ReadNodeWorld(a_handNode);
-			const RL::Vec3 node = ReadNodeWorld(a_target->node);
+			const RL::Vec3 hand = ReadHandWorld(a_hand);
+			const RL::Vec3 node = ReadNodeWorld(a_target->node, a_target->root);
 			const RL::Vec3 target = RL::Add(node, RL::Add(RL::Scale(a_facing, a_target->front), a_target->offset));
 			return RL::HandProgress{ hand, node, RL::Sub(target, hand) };
 		}
@@ -230,26 +252,71 @@ namespace dvb::ReachControl
 			}
 		}
 
-		RL::Calibration CalibrateHand(bool a_rightHand, const RL::Pose& a_hmd, const RL::Vec3& a_rest, const RL::Vec3& a_otherTracking, double a_step, SequenceGuard& a_guard, const std::shared_ptr<Run>& a_run)
+		RL::Calibration CalibrateHand(Hand a_hand, const RL::Pose& a_hmd, const RL::Vec3& a_rest, const RL::Vec3& a_otherTracking, double a_step, SequenceGuard& a_guard, const std::shared_ptr<Run>& a_run)
 		{
-			const json        frames = RL::CalibrationFrames(a_rightHand, a_hmd, a_rest, a_otherTracking, a_step);
-			const std::string nodeName = a_rightHand ? kRightHandNode : kLeftHandNode;
+			const json frames = RL::CalibrationFrames(a_hand, a_hmd, a_rest, a_otherTracking, a_step);
 
+			// The caller replaces this sequence right after the last sample, while its last leg
+			// (and the long tail) still hold the hand, so it never falls back to the controller.
 			const auto t0 = std::chrono::steady_clock::now();
-			a_guard.Start(frames, kSequenceTailMs);
+			a_guard.Start(frames, kCalibrationTailMs);
 
 			std::array<RL::Vec3, 4> points{};
 			for (int i = 0; i < 4; ++i) {
 				SleepUntil(a_run, t0 + std::chrono::milliseconds(RL::CalibrationSampleMs(i)));
-				points[static_cast<std::size_t>(i)] = ReadNodeWorld(nodeName);
+				points[static_cast<std::size_t>(i)] = ReadHandWorld(a_hand);
 			}
-			SleepUntil(a_run, t0 + std::chrono::milliseconds(RL::kCalibrationTotalMs));
-			a_guard.Stop();
 
 			const auto cal = RL::CalibrationFromPoints(points, a_step);
 			if (!cal)
 				throw ToolError(500, "calibration is singular: the hand did not move along every axis");
 			return *cal;
+		}
+
+		/**
+		 * A hand's last measured calibration and the player yaw it was measured at. Reach reuses
+		 * it while the yaw holds, re-measuring only its rest point, and drops it after a run
+		 * that did not converge.
+		 */
+		struct CachedCalibration
+		{
+			RL::Calibration calibration;
+			double          yaw = 0.0;
+		};
+
+		std::mutex                       g_calibrationMutex;
+		std::optional<CachedCalibration> g_calibration[2];  // by HandIndex
+
+		std::optional<RL::Calibration> ReusableCalibration(Hand a_hand, double a_yaw)
+		{
+			std::lock_guard lock(g_calibrationMutex);
+			const auto&     cached = g_calibration[HandIndex(a_hand)];
+			if (cached && RL::CalibrationReusable(cached->yaw, a_yaw))
+				return cached->calibration;
+			return std::nullopt;
+		}
+
+		void StoreCalibration(Hand a_hand, const std::optional<RL::Calibration>& a_calibration, double a_yaw)
+		{
+			std::lock_guard lock(g_calibrationMutex);
+			auto&           slot = g_calibration[HandIndex(a_hand)];
+			if (a_calibration)
+				slot = CachedCalibration{ *a_calibration, a_yaw };
+			else
+				slot.reset();
+		}
+
+		/**
+		 * Holds both hands at rest and returns where the game puts each requested hand once the
+		 * pose has settled: the rest point a reused calibration is anchored to.
+		 */
+		std::pair<RL::Vec3, RL::Vec3> MeasureRest(const RL::Pose& a_hmd, const RestPose& a_rest, SequenceGuard& a_guard, const std::shared_ptr<Run>& a_run)
+		{
+			const long settle = RL::CalibrationSampleMs(0);
+			const auto t0 = std::chrono::steady_clock::now();
+			a_guard.Start(RL::ApproachAndHoldFrames(a_hmd, a_rest.left, a_rest.left, a_rest.right, a_rest.right, settle + 1000), kCalibrationTailMs);
+			SleepUntil(a_run, t0 + std::chrono::milliseconds(settle));
+			return { ReadHandWorld(Hand::Left), ReadHandWorld(Hand::Right) };
 		}
 
 		void RunWorker(std::shared_ptr<Run> a_run, RL::ReachRequest a_req, ToolContext a_ctx)
@@ -261,23 +328,64 @@ namespace dvb::ReachControl
 
 				const double   yaw = ReadPlayerYaw();
 				const RL::Vec3 facing{ std::sin(yaw), std::cos(yaw), 0.0 };
-				const RL::Pose calibHmd = RL::Upright(kDefaultHmd);
+				const RestPose rest = ReadRestPose();
+				const RL::Pose calibHmd = RL::Upright(rest.hmd);
 
+				// A cached calibration is reused while the player faces the same way: one rest
+				// sample re-anchors it instead of four legs per hand.
 				std::optional<RL::Calibration> calLeft;
 				std::optional<RL::Calibration> calRight;
-				if (a_req.left)
-					calLeft = CalibrateHand(false, calibHmd, kRestHandLeft, kRestHandRight, kCalibrationStep, guard, a_run);
-				if (a_req.right)
-					calRight = CalibrateHand(true, calibHmd, kRestHandRight, kRestHandLeft, kCalibrationStep, guard, a_run);
+				if (!a_req.recalibrate) {
+					if (a_req.left)
+						calLeft = ReusableCalibration(Hand::Left, yaw);
+					if (a_req.right)
+						calRight = ReusableCalibration(Hand::Right, yaw);
+				}
+				const bool reuseLeft = calLeft.has_value();
+				const bool reuseRight = calRight.has_value();
+				if (reuseLeft || reuseRight) {
+					const auto [restLeft, restRight] = MeasureRest(calibHmd, rest, guard, a_run);
+					if (reuseLeft)
+						calLeft->rest = restLeft;
+					if (reuseRight)
+						calRight->rest = restRight;
+				}
 
-				RL::Vec3 trackLeft = kRestHandLeft;
-				RL::Vec3 trackRight = kRestHandRight;
-				if (a_req.left)
-					trackLeft = RL::TrackingFor(*calLeft, kRestHandLeft, WorldTarget(a_req.left->node, a_req.left->front, a_req.left->offset, facing));
-				if (a_req.right)
-					trackRight = RL::TrackingFor(*calRight, kRestHandRight, WorldTarget(a_req.right->node, a_req.right->front, a_req.right->offset, facing));
+				// Where calibration leaves the hands: the last measured hand on its +z leg.
+				const RL::Vec3 lastLeg{ 0.0, 0.0, kCalibrationStep };
+				RL::Vec3       heldLeft = rest.left;
+				RL::Vec3       heldRight = rest.right;
+				if (a_req.left && !reuseLeft) {
+					calLeft = CalibrateHand(Hand::Left, calibHmd, rest.left, rest.right, kCalibrationStep, guard, a_run);
+					heldLeft = RL::Add(rest.left, lastLeg);
+				}
+				if (a_req.right && !reuseRight) {
+					calRight = CalibrateHand(Hand::Right, calibHmd, rest.right, rest.left, kCalibrationStep, guard, a_run);
+					heldLeft = rest.left;
+					heldRight = RL::Add(rest.right, lastLeg);
+				}
+				{
+					std::lock_guard lock(g_mutex);
+					if (a_req.left)
+						a_run->progress.calibrationLeft = reuseLeft ? "reused" : "measured";
+					if (a_req.right)
+						a_run->progress.calibrationRight = reuseRight ? "reused" : "measured";
+				}
+				const auto storeCalibrations = [&](bool a_converged) {
+					if (a_req.left)
+						StoreCalibration(Hand::Left, a_converged ? calLeft : std::nullopt, yaw);
+					if (a_req.right)
+						StoreCalibration(Hand::Right, a_converged ? calRight : std::nullopt, yaw);
+				};
 
-				RL::Pose hmd = RL::Upright(kDefaultHmd);
+				RL::Vec3 trackLeft = rest.left;
+				RL::Vec3 trackRight = rest.right;
+				if (a_req.left)
+					trackLeft = RL::TrackingFor(*calLeft, rest.left, WorldTarget(*a_req.left, facing));
+				if (a_req.right)
+					trackRight = RL::TrackingFor(*calRight, rest.right, WorldTarget(*a_req.right, facing));
+
+				RL::Pose hmd = RL::Upright(rest.hmd);
 				if (a_req.head.aim != RL::HeadTarget::Aim::kNone) {
 					RL::Vec3 aim{};
 					if (a_req.head.aim == RL::HeadTarget::Aim::kHands) {
@@ -290,8 +398,8 @@ namespace dvb::ReachControl
 					} else {
 						const bool             useRight = a_req.right.has_value();
 						const RL::Calibration& cal = useRight ? *calRight : *calLeft;
-						const RL::Vec3         rest = useRight ? kRestHandRight : kRestHandLeft;
-						aim = RL::TrackingFor(cal, rest, ReadNodeWorld(a_req.head.node));
+						const RL::Vec3         restHand = useRight ? rest.right : rest.left;
+						aim = RL::TrackingFor(cal, restHand, ReadNodeWorld(a_req.head.node));
 					}
 					RL::Vec3 pos = a_req.head.position ? *a_req.head.position : RL::Add(aim, RL::Vec3{ 0.0, a_req.head.up, a_req.head.back });
 					if (a_req.head.eyeHeight)
@@ -301,31 +409,38 @@ namespace dvb::ReachControl
 
 				SetPhase(a_run, RL::Phase::kReaching);
 
+				// Every sequence blends from where the previous one left the hands (heldLeft /
+				// heldRight), so nothing snaps; a lead-in carries them to approachUnits behind
+				// the targets.
+				RL::Vec3       approachLeft = trackLeft;
+				RL::Vec3       approachRight = trackRight;
+				const RL::Vec3 back = RL::Scale(facing, -a_req.approachUnits);
+				if (a_req.left) {
+					if (const auto d = RL::TrackingDelta(*calLeft, back))
+						approachLeft = RL::Add(trackLeft, *d);
+				}
+				if (a_req.right) {
+					if (const auto d = RL::TrackingDelta(*calRight, back))
+						approachRight = RL::Add(trackRight, *d);
+				}
+				guard.Start(RL::ApproachAndHoldFrames(hmd, heldLeft, approachLeft, heldRight, approachRight, kShortHoldMs), kSequenceTailMs);
+				SleepChecked(a_run, RL::kApproachBlendMs);
+				heldLeft = approachLeft;
+				heldRight = approachRight;
+
 				const int iterations = std::max(1, a_req.iterations);
 				for (int attempt = 1; attempt <= iterations; ++attempt) {
 					const bool last = (attempt == iterations);
 					const long hold = last ? a_req.holdMs : kShortHoldMs;
 
-					RL::Vec3 startLeft = trackLeft;
-					RL::Vec3 startRight = trackRight;
-					if (attempt == 1) {
-						const RL::Vec3 back = RL::Scale(facing, -a_req.approachUnits);
-						if (a_req.left) {
-							if (const auto d = RL::TrackingDelta(*calLeft, back))
-								startLeft = RL::Add(trackLeft, *d);
-						}
-						if (a_req.right) {
-							if (const auto d = RL::TrackingDelta(*calRight, back))
-								startRight = RL::Add(trackRight, *d);
-						}
-					}
-
-					guard.Start(RL::ApproachAndHoldFrames(hmd, startLeft, trackLeft, startRight, trackRight, hold), kSequenceTailMs);
+					guard.Start(RL::ApproachAndHoldFrames(hmd, heldLeft, trackLeft, heldRight, trackRight, hold), kSequenceTailMs);
+					heldLeft = trackLeft;
+					heldRight = trackRight;
 					auto sequenceEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(RL::ApproachAndHoldDurationMs(hold));
 					SleepChecked(a_run, kIterationSettleMs);
 
-					const auto left = MeasureHand(a_req.left, kLeftHandNode, facing);
-					const auto right = MeasureHand(a_req.right, kRightHandNode, facing);
+					const auto left = MeasureHand(a_req.left, Hand::Left, facing);
+					const auto right = MeasureHand(a_req.right, Hand::Right, facing);
 					double     worst = 0.0;
 					if (left)
 						worst = std::max(worst, RL::Norm(left->error));
@@ -340,9 +455,8 @@ namespace dvb::ReachControl
 					}
 
 					if (RL::Converged(worst, a_req.toleranceUnits)) {
+						storeCalibrations(true);
 						if (!last) {
-							guard.Stop();
-							SleepChecked(a_run, kBetweenIterationsMs);
 							guard.Start(RL::ApproachAndHoldFrames(hmd, trackLeft, trackLeft, trackRight, trackRight, a_req.holdMs), kSequenceTailMs);
 							sequenceEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(RL::ApproachAndHoldDurationMs(a_req.holdMs));
 						}
@@ -361,11 +475,10 @@ namespace dvb::ReachControl
 							if (const auto d = RL::TrackingDelta(*calRight, right->error))
 								trackRight = RL::Add(trackRight, *d);
 						}
-						guard.Stop();
-						SleepChecked(a_run, kBetweenIterationsMs);
 						continue;
 					}
 
+					storeCalibrations(false);
 					SetPhase(a_run, RL::Phase::kHolding);
 					SleepUntil(a_run, sequenceEnd);
 					SetError(a_run, std::format("did not reach tolerance after {} iterations", iterations));
@@ -391,6 +504,7 @@ namespace dvb::ReachControl
 		}
 	}
 
+	/// Starts an asynchronous reach run and returns {queued, runId, owner, contract}.
 	json Start(const json& a_args, const std::string& a_owner, const ToolContext& a_ctx)
 	{
 		std::string error;
@@ -435,6 +549,7 @@ namespace dvb::ReachControl
 		};
 	}
 
+	/// Reports progress for a run (the latest run when 'runId' is omitted).
 	json Status(const json& a_args)
 	{
 		std::optional<long> runId;
@@ -470,6 +585,7 @@ namespace dvb::ReachControl
 		return result;
 	}
 
+	/// Requests the active run to stop; the owner must match.
 	json Stop(const std::string& a_owner)
 	{
 		std::lock_guard      lock(g_mutex);
@@ -490,22 +606,45 @@ namespace dvb::ReachControl
 		};
 	}
 
-	bool Active()
+	std::vector<std::string> Actions()
 	{
-		std::lock_guard lock(g_mutex);
-		for (const auto& candidate : g_runs) {
-			if (candidate->active.load())
-				return true;
+		return { "reach", "reachStatus", "reachStop" };
+	}
+
+	bool IsAction(const std::string& a_action)
+	{
+		return a_action == "reach" || a_action == "reachStatus" || a_action == "reachStop";
+	}
+
+	/**
+	 * Resolves the owner as every vrTrackedSet action does, so 'press' over a reach hold matches
+	 * the run's owner; malformed JSON answers 400 as the shared actions do.
+	 */
+	json Handle(const std::string& a_action, const json& a_args, const ToolContext& a_ctx)
+	{
+		try {
+			if (a_action == "reachStatus")
+				return Status(a_args);
+			const std::string owner = ResolveVRInputOwner(a_args, a_ctx);
+			if (a_action == "reach")
+				return Start(a_args, owner, a_ctx);
+			return Stop(owner);
+		} catch (const json::exception& e) {
+			throw ToolError(400, std::format("invalid VR tracked-set JSON: {}", e.what()));
 		}
-		return false;
 	}
 
 	void EndSession()
 	{
-		std::lock_guard lock(g_mutex);
-		for (const auto& candidate : g_runs) {
-			if (candidate->active.load())
-				candidate->stop.store(true);
+		{
+			std::lock_guard lock(g_mutex);
+			for (const auto& candidate : g_runs) {
+				if (candidate->active.load())
+					candidate->stop.store(true);
+			}
 		}
+		std::lock_guard lock(g_calibrationMutex);
+		g_calibration[0].reset();
+		g_calibration[1].reset();
 	}
 }

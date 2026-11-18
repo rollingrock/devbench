@@ -47,4 +47,9 @@ namespace dvb::host
 	/// not agree on the layout), unlike the three above which the core defines itself.
 	/// Empty when the extender cannot resolve it. Used by the `log` tool.
 	std::filesystem::path LogDir();
+
+	/// Ask the game to quit through its own shutdown path, as the console's qqq does.
+	/// DEFINED BY THE PLATFORM. Call on the main thread. Returns empty when the quit
+	/// was requested, else why it could not be. Used by the `quit` tool.
+	std::string RequestQuit();
 }

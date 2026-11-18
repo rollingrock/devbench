@@ -83,8 +83,54 @@
       }
     },
     {
+      "name": "files",
+      "description": "List, read, write and delete files under two roots: 'data', the game's Data folder as the game sees it, so a mod manager's virtual files (MO2's mods and overwrite) are in it and a write lands where the game's own write would; and 'mygames', Documents/My Games/<game>. 'path' is relative to the root, '/' or '\\' separated; one that leaves it (absolute, a drive, '..') is refused. action='list' takes a glob ('*' and '?' in a name, '**' for any folders, case ignored) and returns { count, files: [{ path, bytes, modifiedMs }], capped } sorted by path, at most 10000; a walk that fails partway adds 'incomplete' and 'reason'. 'read' returns { path, bytes, modifiedMs, encoding, content }: 'text' (default) for UTF-8, 'base64' for any bytes, so a backup round-trips exactly. 'write' creates or replaces the file and its folders from 'content' in 'encoding', and says whether it 'created' it; it never writes native code (.dll, .exe, .asi, .bat, .cmd, .ps1, or bytes starting 'MZ'). 'delete' removes one file; 'deleted' is false when there was none. Files up to 16 MB. Runs on the listener thread, so it answers at the main menu and while the game is stalled.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "enum": ["list", "read", "write", "delete"],
+            "type": "string"
+          },
+          "content": {
+            "description": "write: the file's content, in 'encoding'",
+            "type": "string"
+          },
+          "encoding": {
+            "description": "read, write: default 'text' (UTF-8)",
+            "enum": ["text", "base64"],
+            "type": "string"
+          },
+          "path": {
+            "description": "relative to the root; list: a glob, e.g. 'MCM/Settings/*.ini' or 'Mods_Config/**'",
+            "type": "string"
+          },
+          "root": {
+            "enum": ["data", "mygames"],
+            "type": "string"
+          }
+        },
+        "required": ["action", "root", "path"],
+        "type": "object"
+      }
+    },
+    {
+      "name": "quit",
+      "description": "Quit the game to the desktop through the engine's own shutdown, the path the console's qqq takes: no save, no prompt. Answers { pid, quitting: true, killAfterMs } at once; the game goes down on a later frame, so this port stops answering soon after. To know it is gone, wait for process 'pid' to exit, not for the port: shutdown takes seconds and can hang. killAfterMs > 0 arms a watchdog that terminates the process if it still runs that many ms after the call, for a shutdown that hangs (it skips whatever cleanup was left); 0 (default) never kills.",
+      "inputSchema": {
+        "properties": {
+          "killAfterMs": {
+            "description": "terminate the process if it still runs this long after the call; default 0, never",
+            "maximum": 600000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
       "name": "rendertarget",
-      "description": "Look INSIDE the renderer: list the engine's render targets, measure one, or dump it to an image. This is what a screenshot cannot give you — the G-buffer, the light accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. action='list' → every live target as { index, width, height, format, formatName, arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, decodable }, plus 'threading' { taskThreadId, taskThreadIdHex, mainThreadId, tasksOffMainThread, confinedToMainThread, deviceCreationFlags, singleThreadedDevice, multithreadProtected }. action='stats' → copies target 'index' back to the CPU and ",
+      "description": "Look INSIDE the renderer: list the engine's render targets, measure one, or dump it to an image. This is what a screenshot cannot give you — the G-buffer, the light accumulation, the shadow map, i.e. the buffers a rendering bug actually lives in. action='list' → every live target as { index, width, height, format, formatName, arraySize, mipLevels, sampleCount, usage, bindFlags, miscFlags, cpuAccessFlags, decodable }, plus 'threading' { taskThreadId, taskThreadIdHex, mainThreadId, tasksOffMainThread, confinedToMainThread, deviceCreationFlags, singleThreadedDevice, multithreadProtected }. action='stats' → copies target 'index' back to the CPU and returns { nonFinitePct, darkPct, meanLuma, maxChannel } WITHOUT writing a file; action='dump' → the same plus a 24-bit BMP under Data/<extender>/Plugins/devbench/captures (optional 'label' in the filename). Both run only where devbench's tasks are established to stay on the game's main thread (threading.confinedToMainThread), and answer 501 elsewhere: a readback from another thread crashed the GPU driver on Fallout 4 VR. The copy is queued in one frame and mapped without waiting in a later one, so the game never stalls on the GPU; 'readback' in the result says how it went { seq, stage, polls, ms, frames, taskThreadId }, and every D3D step is logged to devbench.log. 'maxDimension' (default 1024, 0 = native) integer-downsamples by nearest sample, never averaging, because averaging hides the single-pixel artefact you are hunting. HDR is Reinhard-tone-mapped and NaN/Inf pixels are painted MAGENTA rather than clamped. Read nonFinitePct before darkPct: NaN displays black but reads as BRIGHT to any exponent test. 'stage' (create | copy | map, default map) stops a stats call after that step, to bisect a failure.",
       "inputSchema": {
         "properties": {
           "action": {
@@ -117,6 +163,7 @@
       "name": "inspect",
       "description": "Read live game state. Runs on the main thread and returns the value synchronously (a 504 means the main thread did not service the task — the message says whether it was busy or hung). kinds: 'state' → { plugin, version, playerLoaded, frame, pid, port, exe, vr, game, extender } — the identity fields name the instance that answered, so a session attached to several running games (Skyrim on 8920, Fallout on 8930) can confirm which one it reached; 'health' → the same identity plus { frame, lastTaskFrame, pendingTasks }, and it is the ONLY kind answered WITHOUT the main thread, so it still replies while a busy or hung main thread would 504, plus { blocking } — is a modal open right now (see 'ui'); 'ui' → { openMenus, messageBoxOpen, blocking, source, menuEvents }, ALSO answered without the main thread (same reason as 'health' — it has to be trustworthy exactly when the game is stuck behind a modal). `source` is 'menuMap' when the answer came from the engine's own menu map (ground truth) and 'none' when nothing is tracking — in which case `blocking:false` means nothing, so check it before believing a false; 'scene' → { position, cell, cellFormId, interior, worldspace?, gameHour, daysPassed } (worldspace is absent, not empty, for an interior cell); 'player' → { formId, level, name }; 'registrants' → who has requested the C-ABI interface and what they registered through it { consumers:[{name,route,atEpoch,atFrame}] (route: message = extender handshake, name is the sender; export = DevBench_GetApiFunction, name is the calling DLL), registrations:[{kind,name,atEpoch,atFrame,replaced}], capabilities:{capture,inspect,menu → [registered keys]} } — side by side, not joined, since the C-ABI has no per-call caller identity; 'extensions' → the kinds other plugins added via the C-ABI RegisterToolExtension, with their descriptors, and kind=<registered> dispatches to that plugin's handler. Registered (mod) kinds: devbench.selftest — devbench inspect-extension self-test; echoes its args..",
       "inputSchema": {
+        "additionalProperties": true,
         "properties": {
           "kind": {
             "description": "default 'state'; or a registered mod kind (see kind='extensions')",
@@ -179,7 +226,7 @@
     },
     {
       "name": "console",
-      "description": "Run a Fallout 4 console command and return what it printed: { executed, command, compiled, captured, count, lines, blocked, queued }. By default (capture=true) the command is compiled and run right away on the main thread, against the console's selected reference, and its output is read from the engine's console buffer in that same task, so `lines` holds this command's output only, complete even when it prints many lines at once (player.showinventory, sqv), with blank lines dropped; one call, no separate read. At most maxLines (default 200, max 5000), the most recent; `omitted` counts the rest. compiled=false means the command did not compile (the reason is in `lines`); captured=true with no lines means it printed nothing; captured=false means the buffer could not be read. `bufferNearlyFull` means lines may have been dropped by the engine's 64 KB limit, which only applies before the Console menu is first opened (the note says how to clear it). Several commands separated by ';' run in order, as in the console; `compiled` is false if any did not compile. A ForEachRef[...] block needs capture=false, which queues the line exactly as if typed; it then runs on a later frame and returns no output (queued=true). A line with a command that leaves the current world (load, coc/CenterOnCell, cow/CenterOnWorld, qqq/QuitGame) is always queued that way, even with capture=true, and the note says so: run inline, an in-game load can hang the game for good. Wait for the load yourself afterwards. `blocked` is true if a modal (MessageBoxMenu) was open at submission time — many state-machine commands (coc, ...) silently no-op behind one rather than erroring; see `menu` to describe/dismiss it. Non-UTF-8 bytes come back escaped as \\xNN.",
+      "description": "Run a Fallout 4 console command and return what it printed: { executed, command, compiled, captured, count, lines, blocked, queued }. By default (capture=true) the command is compiled and run right away on the main thread, against the console's selected reference, and its output is read from the engine's console buffer in that same task, so `lines` holds this command's output only, complete even when it prints many lines at once (player.showinventory, sqv), with blank lines dropped; one call, no separate read. At most maxLines (default 200, max 5000), the most recent; `omitted` counts the rest. compiled=false means the command did not compile (the reason is in `lines`); captured=true with no lines means it printed nothing; captured=false means the buffer could not be read. Until the Console menu is first created the engine's buffer only fills, and past 64 KB it drops every print, so a capture that finds the menu missing creates it first (shown and hidden at once; `madeConsoleMenu` says whether that worked). `bufferNearlyFull` means lines may have been dropped by that limit. Several commands separated by ';' run in order, as in the console; `compiled` is false if any did not compile. A ForEachRef[...] block needs capture=false, which queues the line exactly as if typed; it then runs on a later frame and returns no output (queued=true). A line with a command that leaves the current world (load, coc/CenterOnCell, cow/CenterOnWorld, qqq/QuitGame) is always queued that way, even with capture=true, and the note says so: run inline, an in-game load can hang the game for good. Wait for the load yourself afterwards. `blocked` is true if a modal (MessageBoxMenu) was open at submission time — many state-machine commands (coc, ...) silently no-op behind one rather than erroring; see `menu` to describe/dismiss it. Non-UTF-8 bytes come back escaped as \\xNN.",
       "inputSchema": {
         "properties": {
           "capture": {
@@ -245,6 +292,198 @@
         "type": "object"
       },
       "readOnly": true
+    },
+    {
+      "name": "input",
+      "description": "Synthetic VR input. action='capabilities' (default) returns the contract version, readiness, limits and supported actions; clients should check it rather than assume this tool exists. device='vrTrackedSet' (the only device on Fallout 4) replaces the HMD and both controllers at the OpenVR boundary. 'status' reports readiness, the active sequence and, per hooked OpenVR call, whether devbench sits closest to the runtime (when false, another mod hooked that call first and injected input bypasses it). 'observe' returns the current physical HMD and controllers as one frame. 'sequence' plays a prevalidated timestamped list of frames, each holding the HMD, left and right poses plus both controllers' OpenVR button/touch/axis state; it is asynchronous, has one owner, and returns a controlToken that 'stop' requires. A 'sequence' carrying the running sequence's controlToken replaces its frames in place, without handing the devices back to the physical controllers in between (same controller indices required). 'releaseAll' stops this owner's sequence. The real devices pass through whenever no sequence is active, and a sequence stops on load and new game. Emits input.vrTrackedSet events. Hands are named physically (left / right) or logically (primary / offhand, resolved live from the game's handedness) in press.hand, the pose hands keys and head.lookAt; answers stay keyed left / right and carry leftHanded, and two names for one controller answer 400. action='handedness' answers { leftHanded } (bLeftHandedMode:VR); with leftHanded it sets it and waits until the wands swap controllers, answering { leftHanded, was, changed, elapsedMs }. The swap only shows with the controllers held still and apart, so the check runs under this owner's pose hold, or a short ready-pose hold of its own when nothing holds the devices; another sequence answers 409, as do held hands under 10 units apart. A set that does not take within 2 s puts the old value back and answers 504 with the wand positions. action='press' (hand, buttons and / or stick, durationMs default 100, delayMs) holds named buttons on one controller for durationMs on top of the active sequence or pose hold, as its owner (409 otherwise); trigger and grip also drive their analog axis to 1.0, and the controller packet number moves on at press start and end. stick [x, y] (-1..1, y up) pushes that controller's thumbstick and lets it back to center when the press ends; the poses do not move. Each hand has its own press, so presses on both hands overlap; a new press on a hand replaces its last. It ends with the sequence. capabilities.vrTrackedSet.pressButtons lists the names. action='pose' places the HMD and controllers without calibrating and holds them: the game puts each wand (primaryWandNode / secondaryWandNode, mapped to physical left/right) straight at its controller, so a world point maps to tracking space through the HMD node and a turn fitted from where the held wands land. Skyrim's calibrated 'reach' is not on Fallout (400; use pose). The first pose takes over in the ready pose (head pitched -22 deg, hands 0.6 m in front at chest height, swung 10 deg left so the desktop mirror shows them), at the eye height that puts the camera head.cameraHeight units above the feet over the room node's lift (a body mod's seated / standing offset), so the body stands naturally. 'head' is 'ready' (pitch -22, yaw 0), 'down' (pitch -75, looking at the body) or {pitch?, yaw?, lookAt?, root?, eyeHeight?, cameraHeight?}: pitch (negative looks down) and yaw (positive turns left) in tracking degrees turn the head about the eyes; lookAt ('left' | 'right' | 'hands' | <node> with root? | [x,y,z]) computes them instead, aimed once, before anything moves, at a hand's target in this call (or its wand when the call leaves it), the hands' midpoint, a node or a world point (a hand target is aimed at again once the wands land, since the turn moves the body), and the hold keeps the angles; either height restarts the hold in the ready pose at that height. 'hands' is 'ready' (both) or {left?, right?} each 'ready', {node, root?, front?, offset?} (a node of the player: a VR node slot as the nodes tool names it, else that name in the first-person skeleton, else in the body; root 'player' or 'firstPerson' searches one; front world units ahead along the facing, plus a world offset) or {world:[x,y,z]}, the last two with an optional controller pitch / yaw in degrees (the ready 10 / 10 otherwise; over 90 tilts it back past vertical); an absent hand stays. It moves over moveMs, corrects up to 'corrections' times while a wand is further than toleranceUnits from its target, holds holdMs (default 60 s), and answers once placed (about 0.5-1 s) with { controlToken, fresh, eyeHeight, headPitch, headYaw, lookAt? { target, clamped, reaimed? }, turnDeg (with a node or world target), corrections, hands { left, right: { tracking, pitch, yaw, wand, target?, error? } }, elapsedMs }. A later pose by the same owner moves from the held one in place (fresh: false); 'press' works over it; 'stop' with its controlToken hands the devices back. A pose while another sequence holds the devices, this owner's own included, answers 409. Fingers are not driven.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "enum": [
+              "capabilities",
+              "status",
+              "observe",
+              "sequence",
+              "stop",
+              "releaseAll",
+              "press",
+              "pose",
+              "handedness"
+            ],
+            "type": "string"
+          },
+          "buttons": {
+            "description": "press: buttons held together (trigger, grip, a = A/X, b = B/Y, thumbstick = click); optional with stick",
+            "items": {
+              "enum": ["trigger", "grip", "a", "b", "thumbstick"],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "controlToken": {
+            "description": "stop/releaseAll: opaque token returned by sequence start. sequence: the running sequence's token replaces its frames in place",
+            "type": "string"
+          },
+          "corrections": {
+            "description": "pose: correction moves while a wand misses its node or world target (default 2)",
+            "maximum": 5,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "delayMs": {
+            "description": "press: wait this long before pressing (default 0)",
+            "maximum": 30000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "device": {
+            "description": "the only device on Fallout 4 (default)",
+            "enum": ["vrTrackedSet"],
+            "type": "string"
+          },
+          "durationMs": {
+            "description": "press: how long the buttons / stick stay held (default 100)",
+            "maximum": 10000,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "frames": {
+            "description": "sequence: monotonic atomic frames; each requires tMs, originCode, hmd, left, right; controller objects carry packetNumber/pressed/touched/five axes",
+            "items": {
+              "type": "object"
+            },
+            "maxItems": 60000,
+            "minItems": 1,
+            "type": "array"
+          },
+          "hand": {
+            "description": "press: the controller, physical (left / right) or logical (primary / offhand, for the game's handedness)",
+            "enum": ["left", "right", "primary", "offhand"],
+            "type": "string"
+          },
+          "hands": {
+            "description": "pose: 'ready' for both hands, or {left?, right?} (or primary? / offhand?) each 'ready', {node, root?, front?, offset?:[x,y,z]} (that controller's wand at a node of the player, front world units in front of it along the facing, plus a world offset; root 'player' (body) or 'firstPerson' picks the skeleton the node is searched in) or {world:[x,y,z], headOffset?:[outward,forward,up]} (headOffset: world units along the HMD's axes as posed, outward toward that hand's own side, so one offset mirrors around the head); a node or world hand takes pitch / yaw (degrees, -180..180) for how the controller points, or yawIn instead of yaw (degrees, positive turns the controller toward the body for either hand); an absent hand stays where it is held",
+            "oneOf": [
+              {
+                "enum": ["ready"],
+                "type": "string"
+              },
+              {
+                "type": "object"
+              }
+            ]
+          },
+          "head": {
+            "description": "pose: 'ready' (pitch -22, yaw 0), 'down' (pitch -75, yaw 0) or {pitch?, yaw?, lookAt?, root?, eyeHeight?, cameraHeight?} - pitch in degrees (-85..85, negative looks down) and yaw (-180..180, positive turns left), absent keeps the held head; lookAt 'left' | 'right' | 'primary' | 'offhand' | 'hands' | <node> | [x,y,z] computes both instead (pitch clamped to 85), root 'player' or 'firstPerson' for a node; eyeHeight (0.3..2.5) the injected eye height in tracking meters, instead of the one cameraHeight gives; cameraHeight (1..1000) world units above the player's feet the camera should sit at (default 115, a natural FRIK body); either height starts a fresh hold",
+            "oneOf": [
+              {
+                "enum": ["ready", "down"],
+                "type": "string"
+              },
+              {
+                "type": "object"
+              }
+            ]
+          },
+          "holdMs": {
+            "description": "pose: how long to hold after the move (default 60000)",
+            "maximum": 1798000,
+            "minimum": 100,
+            "type": "integer"
+          },
+          "leftHanded": {
+            "description": "handedness: set the game's handedness (true: the left controller is the primary hand); absent reads it",
+            "type": "boolean"
+          },
+          "moveMs": {
+            "description": "pose: how long a move takes, so it is seen (default 300)",
+            "maximum": 5000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "owner": {
+            "description": "stable task/session owner; defaults to MCP session id or rest:anonymous",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "stick": {
+            "description": "press: thumbstick deflection [x, y] held for durationMs (x right, y up), then back to center; touches the stick, does not click it",
+            "items": {
+              "maximum": 1,
+              "minimum": -1,
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "tailMs": {
+            "description": "sequence: final-state visibility before automatic release (default 50ms)",
+            "maximum": 1000,
+            "minimum": 10,
+            "type": "integer"
+          },
+          "toleranceUnits": {
+            "description": "pose: a wand this close to its target needs no correction (default 1)",
+            "maximum": 50,
+            "minimum": 0.05,
+            "type": "number"
+          }
+        },
+        "type": "object"
+      }
+    },
+    {
+      "name": "player",
+      "description": "The player's power armor and weapon. action='status' (default) → { inPowerArmor }, the engine's own answer (PowerArmor::ActorInPowerArmor). 'findPowerArmor' (radius default 500 units, limit default 5) → { inPowerArmor, radius, frames:[{ formId, baseFormId, name, distance }] }, the power armor frames (furniture with the FurnitureTypePowerArmor keyword) in the player's cell, nearest first; a frame across an exterior cell border is not listed. 'enterPowerArmor' (formId, default the nearest frame within radius) and 'exitPowerArmor' switch at once, without the step-in animation, through the console's player.cf \"Actor.SwitchToPowerArmor\" <frame> / none, then wait (wait default true) until the engine state flips or timeoutMs (default 10000, max 60000) passes, polling short main-thread reads so the skeleton swap is never blocked. Returns { action, frame?, command, compiled, lines, inPowerArmor, waitedMs, mainThreadStalls?, outcome, note? }; outcome is 'switched', 'already' (nothing was run), 'refused' (the state did not change in time; a mod can block it) or 'notWaited'. Those two are instant setup, not the transition a player makes. 'stepIn' and 'stepOut' (VR only) make that transition through the controllers, so the game runs its own activation, walk-in and animations: stepIn (formId / radius as for enterPowerArmor) stands the player 70 units behind the frame facing it, injects a standing pose through the input tool (owner devbench.player; 409 while another owner holds it), turns it until the primary wand's activation ray is on the frame (read from the wand's ViewCaster), taps A on the primary hand and waits, tapping again every 1.5 s while the state has not flipped (a tap was lost twice in live runs, cause unknown); stepOut holds the secondary hand's A/X button for 2 s and waits. Both hand the controllers back when done. They return { action, frame?, aim?: { matched, yawDeg, passes:[{ yawDeg, wandYawDeg, wandErrorDeg, pick }] }, inPowerArmor, taps?, waitedMs, outcome, note? }, outcome as above plus 'notAimed' (the ray never landed on the frame, so nothing was pressed). The exit gesture was measured with KabutoVR loaded. 'weapon' → { drawn, weaponState, equipped }: weaponState is sheathed | wantToDraw | drawing | drawn | wantToSheathe | sheathing, drawn is weaponState >= drawn (what GetWeaponMagicDrawn means, so true for drawn fists), equipped is the weapon in hand as { name, formId } or null for none (fists); equipped is VR only. 'drawWeapon' and 'sheatheWeapon' make the engine's own draw / sheathe call (Actor::DrawWeaponMagicHands), then wait (wait default true) until weaponState settles at drawn / sheathed or timeoutMs passes. The engine ignores a call made just after the previous switch settled, so while the weapon is still at rest the call is made again every 250 ms (`calls` counts them when more than one). They return { action, outcome, drawn, weaponState, equipped, waitedMs, calls?, mainThreadStalls?, note? }; outcome is 'switched', 'already' (nothing was called), 'refused' (the state did not settle in time) or 'notWaited'. sheatheWeapon also puts away drawn fists, which unequipping a weapon leaves up. 409 when no save is loaded.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "description": "default 'status'",
+            "enum": [
+              "status",
+              "findPowerArmor",
+              "enterPowerArmor",
+              "exitPowerArmor",
+              "stepIn",
+              "stepOut",
+              "weapon",
+              "drawWeapon",
+              "sheatheWeapon"
+            ],
+            "type": "string"
+          },
+          "formId": {
+            "description": "enterPowerArmor / stepIn: the frame reference, hex (\"0x0001F2A3\"), as findPowerArmor lists it; default the nearest frame within radius",
+            "type": "string"
+          },
+          "limit": {
+            "description": "findPowerArmor: most frames to list (default 5)",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "radius": {
+            "description": "findPowerArmor, or enterPowerArmor / stepIn without formId: how far to look, in game units (default 500)",
+            "maximum": 20000.0,
+            "minimum": 1,
+            "type": "number"
+          },
+          "timeoutMs": {
+            "description": "enterPowerArmor / exitPowerArmor / stepIn / stepOut / drawWeapon / sheatheWeapon: how long to wait for the state (default 10000; stepOut adds its 2 s hold)",
+            "maximum": 60000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "wait": {
+            "description": "enterPowerArmor / exitPowerArmor / drawWeapon / sheatheWeapon: wait for the engine state to flip (default true)",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
     }
   ]
 }

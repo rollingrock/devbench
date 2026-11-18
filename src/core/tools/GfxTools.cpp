@@ -67,17 +67,17 @@ namespace dvb::tools
 			const DWORD tid = ::GetCurrentThreadId();
 			const UINT  flags = a_device->GetCreationFlags();
 			json        out{
-                // Decimal and hex, because a log line ("runs on thread 56820") and cdb ("~")
-                // print it differently, and the point is to compare the two.
-                { "taskThreadId", tid },
-                { "taskThreadIdHex", std::format("0x{:X}", tid) },
-                // 0 = the platform does not record it. Compare with taskThreadId: on FO4VR
-                // they were found to differ (TS-031), which is why both are reported.
-                { "mainThreadId", MainThread::OwnerThreadId() },
-                { "tasksOffMainThread", MainThread::OffThreadRuns() },
-                { "confinedToMainThread", MainThread::ConfinedToMainThread() },
-                { "deviceCreationFlags", std::format("0x{:X}", flags) },
-                { "singleThreadedDevice", (flags & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 },
+				// Decimal and hex, because a log line ("runs on thread 56820") and cdb ("~")
+				// print it differently, and the point is to compare the two.
+				{ "taskThreadId", tid },
+				{ "taskThreadIdHex", std::format("0x{:X}", tid) },
+				// 0 = the platform does not record it. Compare with taskThreadId: on FO4VR
+				// they were found to differ (TS-031), which is why both are reported.
+				{ "mainThreadId", MainThread::OwnerThreadId() },
+				{ "tasksOffMainThread", MainThread::OffThreadRuns() },
+				{ "confinedToMainThread", MainThread::ConfinedToMainThread() },
+				{ "deviceCreationFlags", std::format("0x{:X}", flags) },
+				{ "singleThreadedDevice", (flags & D3D11_CREATE_DEVICE_SINGLETHREADED) != 0 },
 			};
 			// null, not false, when the runtime does not offer the interface: unknown is
 			// a different answer from "off".
@@ -276,7 +276,7 @@ namespace dvb::tools
 
 			constexpr auto kBudget = std::chrono::milliseconds(5000);
 			const auto     remaining = [&]() {
-                return std::chrono::duration_cast<std::chrono::milliseconds>(started + kBudget - std::chrono::steady_clock::now());
+				return std::chrono::duration_cast<std::chrono::milliseconds>(started + kBudget - std::chrono::steady_clock::now());
 			};
 			int polls = 0;
 

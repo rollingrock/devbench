@@ -2,6 +2,7 @@
 
 #include "AssetInfo.h"
 #include "core/FormSearchLogic.h"
+#include "core/GameText.h"
 #include "core/ToolRegistry.h"
 
 #include <RE/A/Actor.h>
@@ -45,7 +46,7 @@ namespace dvb::FormSearch
 
 		std::string Str(const char* a_text)
 		{
-			return a_text ? a_text : "";
+			return FromGame(a_text);
 		}
 
 		json Identity(RE::TESForm* a_form)

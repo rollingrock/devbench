@@ -180,7 +180,12 @@ namespace dvb::MainThread
 		});
 	}
 
-	json RunAndWait(std::function<json()> a_fn, std::chrono::milliseconds a_timeout, const std::atomic<bool>* a_keepWaiting)
+	/**
+	 * Runs a_fn on the main thread through devbench's own queue and waits for its result.
+	 * a_queue is ignored: every task already runs on the main thread between frames, and
+	 * F4SE's UI queue (the Skyrim kUi equivalent) runs tasks on worker threads on FO4VR.
+	 */
+	json RunAndWait(std::function<json()> a_fn, std::chrono::milliseconds a_timeout, const std::atomic<bool>* a_keepWaiting, Queue)
 	{
 		if (!g_ownQueue.load(std::memory_order_acquire) && !F4SE::GetTaskInterface())
 			throw ToolError(500, "F4SE TaskInterface unavailable");

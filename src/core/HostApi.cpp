@@ -6,6 +6,7 @@
 #include "core/Json.h"
 #include "core/Log.h"
 #include "core/MainThread.h"
+#include "core/Notices.h"
 #include "core/ToolExtensions.h"
 #include "core/ToolRegistry.h"
 
@@ -91,7 +92,7 @@ namespace dvb::HostApi
 				DevBenchAPI::WriteFn write = +[](void* a_sink, const char* a_json) {
 					*static_cast<std::string*>(a_sink) = a_json ? a_json : "";
 				};
-				a_handler(a_ctx, a_args.dump().c_str(), &result, write);
+				a_handler(a_ctx, Dump(a_args).c_str(), &result, write);
 				if (result.empty())
 					return json::object();
 				try {
@@ -183,6 +184,22 @@ namespace dvb::HostApi
 			float GetTimeScale() override
 			{
 				return g_timeScale.get ? g_timeScale.get() : std::numeric_limits<float>::quiet_NaN();
+			}
+
+			bool PostNotice(const char* a_key, const char* a_source, const char* a_severity, const char* a_text, std::uint32_t a_ttlMs) override
+			{
+				if (!a_key || !*a_key || !a_text || !*a_text)
+					return false;
+				Notices::Severity severity = Notices::Severity::kInfo;
+				if (a_severity)
+					(void)Notices::ParseSeverity(a_severity, severity);
+				Notices::Global().Post(a_key, a_source && *a_source ? a_source : "plugin", severity, a_text, a_ttlMs, Notices::NowMs());
+				return true;
+			}
+
+			bool ClearNotice(const char* a_key) override
+			{
+				return a_key && Notices::Global().Clear(a_key);
 			}
 		};
 

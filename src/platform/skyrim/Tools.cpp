@@ -8,13 +8,18 @@
 #include "Capture.h"
 #include "ConsoleLogCapture.h"
 #include "DrawStats.h"
+#include "FormLookup.h"
 #include "FormSearch.h"
 #include "FreeCamera.h"
 #include "GameEvents.h"
+#include "Gfx.h"
 #include "KeyboardInput.h"
+#include "Map.h"
+#include "ModalWatch.h"
 #include "Papyrus.h"
 #include "Recording.h"
 #include "ReplayDriver.h"
+#include "SaveDelete.h"
 #include "TimeScaleControl.h"
 #include "Version.h"
 #include "core/ActorIdleLogic.h"
@@ -24,12 +29,14 @@
 #include "core/EventBus.h"
 #include "core/FormSearchLogic.h"
 #include "core/GameState.h"
+#include "core/GameText.h"
 #include "core/HeldLightsLogic.h"
 #include "core/HostApi.h"
 #include "core/InspectLogic.h"
 #include "core/Json.h"
 #include "core/MainThread.h"
 #include "core/ReplayTrajectory.h"
+#include "core/RunStatusLogic.h"
 #include "core/ScenarioPolicy.h"
 #include "core/Server.h"
 #include "core/ToolExtensions.h"
@@ -37,11 +44,13 @@
 #include "core/VRInputState.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <map>
 #include <optional>
 #include <thread>
@@ -214,7 +223,7 @@ namespace dvb
 				throw ToolError(500, "SKSE TaskInterface unavailable");
 
 			if (!capture) {
-				task->AddTask([command]() { RE::Console::ExecuteCommand(command.c_str()); });
+				task->AddTask([command = ToGame(command)]() { RE::Console::ExecuteCommand(command.c_str()); });
 				return json{ { "queued", true }, { "command", command }, { "capturing", false } };
 			}
 			// The output comes back with the exec, saving the 'read' round trip; it is this capture's
@@ -273,7 +282,7 @@ namespace dvb
 			std::error_code        ec;
 			for (const auto& e : fs::directory_iterator(a_dir, ec)) {
 				if (e.path().extension() == ".ess")
-					out.push_back({ e.path().stem().string(), e.last_write_time(ec) });
+					out.push_back({ Utf8(e.path().stem()), e.last_write_time(ec) });
 			}
 			std::sort(out.begin(), out.end(), [](const SaveEntry& a, const SaveEntry& b) { return a.mtime > b.mtime; });
 			return out;
@@ -409,6 +418,19 @@ namespace dvb
 			else
 				a_out["metaNote"] = "none of the matched saves' .ess headers could be read";
 		}
+
+		// Pending until the main thread starts the delete; Abandoned when the caller timed out first, so a late task is a no-op.
+		struct DeleteJob
+		{
+			enum : int
+			{
+				kPending,
+				kStarted,
+				kAbandoned
+			};
+			std::atomic<int>                 state{ kPending };
+			std::promise<SaveDelete::Result> result;
+		};
 
 		// game: programmatic save / load / list. Named saves use SKSE's Game.SaveGame
 		// request; loads use BGSSaveLoadManager. loadLast gives a settled real-save
@@ -641,7 +663,7 @@ namespace dvb
 					throw ToolError(404, std::format("no .ess saves in {}", saveDir.string()));
 				const std::string name = saves.front().name;
 				Recording::NoteLoadEntry(name);  // reproducible entry point for a later recording
-				task->AddTask([name]() {
+				task->AddTask([name = ToGame(name)]() {
 					if (auto* m = RE::BGSSaveLoadManager::GetSingleton())
 						m->Load(name.c_str(), false);
 				});
@@ -649,19 +671,21 @@ namespace dvb
 				return json{ { "queued", true }, { "action", action }, { "name", name }, { "note", kLoadNote } };
 			}
 			if (action == "save" || action == "load") {
-				const std::string name = a_args.value("name", std::string{});
+				const std::string name = a_args.value("name", a_args.value("save", std::string{}));
 				if (name.empty())
 					throw ToolError(400, std::format("action '{}' requires a 'name'", action));
 				const bool isSave = (action == "save");
+				auto       file = name;
 				if (!isSave) {
 					// Validate the save exists rather than silently queueing a no-op load
 					// (a bare {queued:true} on a bad name is a cold-start trap for agents).
 					const fs::path saveDir = ResolveSaveDir(a_args);
 					const auto     saves = EnumerateSaves(saveDir);
-					const bool     exists = std::any_of(saves.begin(), saves.end(),
+					const auto     it = std::find_if(saves.begin(), saves.end(),
 						[&](const SaveEntry& s) { return s.name == name; });
-					if (!exists)
+					if (it == saves.end())
 						throw ToolError(404, std::format("save '{}' not found in {} — use action='list' for valid names", name, saveDir.string()));
+					file = it->name;
 					Recording::NoteLoadEntry(name);  // reproducible entry point for a later recording
 				}
 				if (isSave) {
@@ -669,11 +693,11 @@ namespace dvb
 					// against the main thread's VM lock, so use SKSE's save request.
 					Papyrus::QueueCall(json{ { "script", "Game" }, { "function", "SaveGame" }, { "args", json::array({ name }) } });
 				} else {
-					task->AddTask([name]() {
+					task->AddTask([file = ToGame(file)]() {
 						auto* m = RE::BGSSaveLoadManager::GetSingleton();
 						if (!m)
 							return;
-						m->Load(name.c_str(), false);  // checkForMods=false skips the mod-mismatch modal
+						m->Load(file.c_str(), false);  // checkForMods=false skips the mod-mismatch modal
 					});
 				}
 				logs::info("devbench: game {} '{}'", action, name);
@@ -682,10 +706,54 @@ namespace dvb
 					out["note"] = kLoadNote;
 				return out;
 			}
-			throw ToolError(400, std::format("unknown action '{}' (list|save|load|loadLast|advanceTime|getTimeScale|setTimeScale|getDifficulty|setDifficulty|getAlwaysActive|setAlwaysActive)", action));
+			if (action == "delete") {
+				// The engine deletes from its own saves directory, so a 'dir' override would validate one file and delete another.
+				if (a_args.contains("dir"))
+					throw ToolError(400, "action 'delete' does not take 'dir'");
+				const std::string stem = SaveDelete::Stem(a_args.value("name", std::string{}));
+				if (stem.empty())
+					throw ToolError(400, "action 'delete' requires a 'name'");
+				const fs::path           saveDir = ResolveSaveDir(a_args);
+				const auto               saves = EnumerateSaves(saveDir);
+				std::vector<std::string> matches;
+				for (const auto& s : saves)
+					if (Lower(s.name) == Lower(stem))
+						matches.push_back(s.name);
+				if (matches.empty())
+					throw ToolError(404, std::format("save '{}' not found in {} — use action='list' for valid names", stem, saveDir.string()));
+				if (matches.size() > 1)
+					throw ToolError(409, std::format("'{}' matches {} saves that differ only by case; use the exact name", stem, matches.size()));
+				const std::string target = matches.front();
+
+				auto job = std::make_shared<DeleteJob>();
+				auto result = job->result.get_future();
+				task->AddTask([job, target]() {
+					int expected = DeleteJob::kPending;
+					if (!job->state.compare_exchange_strong(expected, DeleteJob::kStarted))
+						return;  // the caller already gave up; deleting now would be unreported
+					job->result.set_value(SaveDelete::Delete(ToGame(target)));
+				});
+				if (result.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+					int expected = DeleteJob::kPending;
+					if (job->state.compare_exchange_strong(expected, DeleteJob::kAbandoned))
+						throw ToolError(504, "game delete did not start within 5s and was cancelled; nothing was deleted");
+					result.wait();  // already started on the main thread, so it finishes shortly
+				}
+				switch (result.get()) {
+				case SaveDelete::Result::kDeleted:
+					logs::info("devbench: game delete '{}'", target);
+					return json{ { "deleted", true }, { "action", action }, { "name", target } };
+				case SaveDelete::Result::kUnsupported:
+					throw ToolError(501, "game delete is not supported on VR");
+				default:
+					throw ToolError(409, std::format("engine save list has no entry for '{}'", target));
+				}
+			}
+			throw ToolError(400, std::format("unknown action '{}' (list|save|load|loadLast|delete|advanceTime|getTimeScale|setTimeScale|getDifficulty|setDifficulty|getAlwaysActive|setAlwaysActive)", action));
 		}
 
 		bool ContainsCI(const std::string& a_hay, const std::string& a_needle);  // defined below (near CheckState)
+		using FormLookup::LookupFormArg;
 
 		// menu: detect/answer menus. 'list' = open menus + messageBoxOpen (tracked live from
 		// MenuOpenCloseEvent) + consumer-registered handler names; 'describe' = the active
@@ -726,7 +794,7 @@ namespace dvb
 				auto entry = ToolExtensions::Find("menu", name);
 				if (!entry)
 					throw ToolError(404, std::format("no handler registered for menu '{}' (see menu list .registered)", name));
-				return entry->handler(a_args, a_ctx);
+				return entry->handler(a_ctx.rawArgs ? *a_ctx.rawArgs : a_args, a_ctx);
 			}
 
 			if (action == "open") {
@@ -753,6 +821,41 @@ namespace dvb
 				return json{ { "queued", true }, { "action", "open" }, { "name", name } };
 			}
 
+			if (action == "readBook") {
+				// BookMenu needs the book itself, so 'open' cannot show it: a world reference opens through
+				// OpenMenuFromReference and an inventory book through OpenMenuFromBaseForm.
+				const std::string arg = a_args.value("formId", std::string{});
+				if (arg.empty())
+					throw ToolError(400, "action 'readBook' requires a 'formId' (a book form or a reference to one)");
+				const bool activate = a_args.value("activate", false);
+				return MainThread::RunAndWait([arg, activate]() -> json {
+					auto* form = LookupFormArg(arg);
+					if (!form)
+						throw ToolError(404, std::format("no form for '{}'", arg));
+					auto* player = RE::PlayerCharacter::GetSingleton();
+					if (!player)
+						throw ToolError(409, "player is not loaded");
+					auto* ref = form->As<RE::TESObjectREFR>();
+					auto* base = ref ? ref->GetBaseObject() : form;
+					auto* book = base ? base->As<RE::TESObjectBOOK>() : nullptr;
+					if (!book)
+						throw ToolError(400, std::format("'{}' is not a book or a reference to one", arg));
+					if (activate) {
+						if (!ref)
+							throw ToolError(400, "readBook 'activate' needs a reference to a book; an inventory book has no entry point outside the InventoryMenu");
+						// The player's own activation: TESObjectBOOK::Activate, so a hook on its BookMenu call site fires.
+						const bool activated = ref->ActivateRef(player, 0, nullptr, 1, false);
+						return json{ { "action", "readBook" }, { "queued", true }, { "formId", std::format("{:08X}", book->GetFormID()) }, { "viaRef", true }, { "viaActivate", true }, { "activated", activated } };
+					}
+					if (ref) {
+						RE::BookMenu::OpenMenuFromReference(ref);
+					} else {
+						RE::BookMenu::OpenMenuFromBaseForm(book);
+					}
+					return json{ { "action", "readBook" }, { "queued", true }, { "formId", std::format("{:08X}", book->GetFormID()) }, { "viaRef", ref != nullptr } };
+				});
+			}
+
 			if (action == "close") {
 				// Dismiss a menu by name via the UI message queue (kHide). For a modal
 				// MessageBoxMenu this cancels/closes it — unblocking automated flows (e.g.
@@ -768,6 +871,18 @@ namespace dvb
 						q->AddMessage(name.c_str(), RE::UI_MESSAGE_TYPE::kHide, nullptr);
 				});
 				return json{ { "queued", true }, { "action", "close" }, { "name", name } };
+			}
+
+			if (action == "autoDismiss") {
+				if (a_args.contains("names")) {
+					if (!a_args["names"].is_array())
+						throw ToolError(400, "'names' must be an array of menu names");
+					std::vector<std::string> names;
+					for (const auto& n : a_args["names"])
+						names.push_back(n.get<std::string>());
+					ModalWatch::SetAutoDismiss(names);
+				}
+				return json{ { "autoDismiss", ModalWatch::AutoDismiss() } };
 			}
 
 			if (action == "describe") {
@@ -805,7 +920,7 @@ namespace dvb
 						auto* data = RE::MessageBoxMenu::GetCurrentMessageBoxData();
 						if (!data)
 							return json{ { "accepted", false }, { "reason", "no active MessageBoxMenu" } };
-						if (!data->bodyText.c_str() || !ContainsCI(data->bodyText.c_str(), matchBody))
+						if (!data->bodyText.c_str() || !ContainsCI(FromGame(data->bodyText.c_str()), matchBody))
 							return json{ { "accepted", false }, { "reason", "body did not match matchBody" } };
 						// Non-cancel button, but never out of range: fall back to 0 on a one-button box.
 						const int pick = (data->cancelButtonIndex == 0 && data->buttonText.size() > 1) ? 1 : 0;
@@ -823,7 +938,7 @@ namespace dvb
 				return json{ { "queued", true }, { "action", "accept" }, { "index", index } };
 			}
 
-			throw ToolError(400, std::format("unknown action '{}' (list|open|close|describe|accept|invoke)", action));
+			throw ToolError(400, std::format("unknown action '{}' (list|open|close|describe|accept|invoke|readBook)", action));
 		}
 
 		constexpr long long kMaxWaitHours = 100000;
@@ -861,12 +976,13 @@ namespace dvb
 
 		json WaitOrSleepHandler(const json& a_args, bool a_sleep)
 		{
-			const auto it = a_args.find("hours");
+			const auto            it = a_args.find("hours");
+			constexpr const char* kHoursHint = "'hours' must be a positive integer of GAME-time hours (use `wait` with 'ms' or 'until' for real time)";
 			if (it == a_args.end() || !it->is_number_integer())
-				throw ToolError(400, "'hours' must be a positive integer");
+				throw ToolError(400, kHoursHint);
 			const long long hours = it->get<long long>();
 			if (hours <= 0)
-				throw ToolError(400, "'hours' must be a positive integer");
+				throw ToolError(400, kHoursHint);
 			if (hours > kMaxWaitHours)
 				throw ToolError(400, std::format("'hours' must be <= {}", kMaxWaitHours));
 
@@ -923,35 +1039,10 @@ namespace dvb
 				{ "formType", std::string(RE::FormTypeToString(a_form->GetFormType())) },
 			};
 			if (const char* n = a_form->GetName(); n && *n)
-				j["name"] = n;
+				j["name"] = FromGame(n);
 			if (const char* e = a_form->GetFormEditorID(); e && *e)
 				j["editorId"] = e;
 			return j;
-		}
-
-		// Resolve a form argument: an explicit 0x.. FormID, else an EditorID (tried first so an all-hex
-		// EditorID isn't misread as a FormID), else a bare hex FormID. The hex must be the whole string
-		// and fit 32 bits, so "14G" or an overflow can't truncate to a valid FormID and resolve the
-		// wrong form. Shared by 'inspect refs' formId and 'camera frame'.
-		RE::TESForm* LookupFormArg(const std::string& a_arg)
-		{
-			auto byHex = [](const std::string& s) -> RE::TESForm* {
-				std::size_t        consumed = 0;
-				unsigned long long id = 0;
-				try {
-					id = std::stoull(s, &consumed, 16);
-				} catch (...) {
-					return nullptr;
-				}
-				if (consumed != s.size() || id > 0xFFFFFFFFull)
-					return nullptr;
-				return RE::TESForm::LookupByID(static_cast<RE::FormID>(id));
-			};
-			if (a_arg.size() > 2 && a_arg[0] == '0' && (a_arg[1] == 'x' || a_arg[1] == 'X'))
-				return byHex(a_arg.substr(2));
-			if (auto* f = RE::TESForm::LookupByEditorID(a_arg))
-				return f;
-			return byHex(a_arg);
 		}
 
 		// Identify a placed reference — the form's identity plus its base object and position.
@@ -1331,6 +1422,16 @@ namespace dvb
 			return SnapshotHands(a_actor, &a_active, &a_budget).report;
 		}
 
+		int InspectLimit(const json& a_args, const char* a_kind)
+		{
+			const auto it = a_args.find("limit");
+			if (it == a_args.end())
+				return 100;
+			if (!it->is_number_integer() || it->get<std::int64_t>() < 0 || it->get<std::int64_t>() > std::numeric_limits<int>::max())
+				throw ToolError(400, std::format("inspect {}: 'limit' must be an integer 0..{}", a_kind, std::numeric_limits<int>::max()));
+			return it->get<int>();
+		}
+
 		// Normalize a form-type filter to a substring needle. The engine's type strings are 4-char
 		// codes (ACHR, NPC_, CONT, WEAP); map common friendly names ('actor', 'weapon') onto them so
 		// a substring match works (a longer friendly name like "weapon" never matches "weap"
@@ -1501,7 +1602,7 @@ namespace dvb
 						{ "gold", pc->GetGoldAmount() },
 					};
 					if (const char* n = pc->GetName(); n && *n)
-						j["name"] = n;
+						j["name"] = FromGame(n);
 					if (auto* base = pc->GetActorBase()) {
 						switch (base->GetSex()) {
 						case RE::SEX::kMale:
@@ -1549,9 +1650,7 @@ namespace dvb
 			if (kind == "inventory") {
 				const std::string formId = a_args.value("formId", std::string{});
 				const std::string typeFilter = a_args.value("formType", std::string{});
-				const int         limit = a_args.value("limit", 100);
-				if (limit < 0)
-					throw ToolError(400, "inspect inventory: 'limit' must be >= 0");
+				const int         limit = InspectLimit(a_args, "inventory");
 				return MainThread::RunAndWait([=]() -> json {
 					auto lower = [](std::string s) {
 						std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1605,9 +1704,7 @@ namespace dvb
 			// quests: the journal — quests that are running or completed, each with its current stage
 			// and non-dormant objectives. 'active' marks the player's tracked quest. 'limit' default 100.
 			if (kind == "quests") {
-				const int limit = a_args.value("limit", 100);
-				if (limit < 0)
-					throw ToolError(400, "inspect quests: 'limit' must be >= 0");
+				const int limit = InspectLimit(a_args, "quests");
 				return MainThread::RunAndWait([=]() -> json {
 					auto* dh = RE::TESDataHandler::GetSingleton();
 					if (!dh)
@@ -1850,11 +1947,9 @@ namespace dvb
 				const std::string typeFilter = a_args.value("formType", std::string{});
 				const std::string modelFilter = a_args.value("model", std::string{});
 				const double      radius = a_args.value("radius", 0.0);
-				const int         limit = a_args.value("limit", 100);
+				const int         limit = InspectLimit(a_args, "refs");
 				if (radius < 0.0)
 					throw ToolError(400, "inspect refs: 'radius' must be >= 0 (0 scans the whole loaded grid)");
-				if (limit < 0)
-					throw ToolError(400, "inspect refs: 'limit' must be >= 0");
 				return MainThread::RunAndWait([=]() -> json {
 					auto lower = [](std::string s) {
 						std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1979,7 +2074,7 @@ namespace dvb
 
 			// A consumer-registered inspect kind — route to its handler (receives the full args).
 			if (auto entry = ToolExtensions::Find("inspect", kind))
-				return entry->handler(a_args, a_ctx);
+				return entry->handler(a_ctx.rawArgs ? *a_ctx.rawArgs : a_args, a_ctx);
 
 			throw ToolError(400, std::format("unknown kind '{}' (state|vm|scene|mods|player|inventory|quests|effects|refs|lights|draws|registrants|screenshots|extensions, or a registered kind — see inspect kind=extensions)", kind));
 		}
@@ -2344,7 +2439,7 @@ namespace dvb
 		// Open menus that would make a replay meaningless — they pause the sim, are modal, or grab the
 		// cursor into menu-mode (inventory/dialogue/lockpick/messagebox). Always-open menus (HUD/cursor)
 		// and the console (SKSE task exec still runs) never block. Reads live UI flags on the main thread.
-		std::vector<std::string> BlockingMenus()
+		std::vector<std::string> BlockingMenus(milliseconds a_stallLimit = milliseconds(1000))
 		{
 			try {
 				const json names = MainThread::RunAndWait([]() -> json {
@@ -2362,7 +2457,7 @@ namespace dvb
 						}
 					return out;
 				},
-					milliseconds(1000));
+					a_stallLimit);
 				return names.get<std::vector<std::string>>();
 			} catch (const ToolError&) {
 				// A pausing menu froze the frame counter → RunAndWait 504; that IS blocked. Name it from
@@ -2384,7 +2479,7 @@ namespace dvb
 			try {
 				return MainThread::RunAndWait([&a_matchBody]() -> json {
 					auto* data = RE::MessageBoxMenu::GetCurrentMessageBoxData();
-					if (!data || !data->bodyText.c_str() || !ContainsCI(data->bodyText.c_str(), a_matchBody))
+					if (!data || !data->bodyText.c_str() || !ContainsCI(FromGame(data->bodyText.c_str()), a_matchBody))
 						return false;
 					RE::MessageBoxMenu::SelectOption((data->cancelButtonIndex == 0 && data->buttonText.size() > 1) ? 1 : 0);
 					return true;
@@ -2437,7 +2532,7 @@ namespace dvb
 		// Live-state conditions for waitUntil. playerLoaded marshals to the main thread;
 		// a mid-load stall (RunAndWait 504) just means "not yet" → keep polling. Menu
 		// conditions read the thread-safe tracked set (no marshal).
-		bool CheckState(const std::string& a_cond)
+		bool CheckState(const std::string& a_cond, milliseconds a_stallLimit = milliseconds(2000))
 		{
 			if (a_cond == "playerLoaded") {
 				try {
@@ -2445,7 +2540,7 @@ namespace dvb
 						auto* pc = RE::PlayerCharacter::GetSingleton();
 						return pc && pc->Get3D() != nullptr;
 					},
-						milliseconds(2000));
+						a_stallLimit);
 					return r.get<bool>();
 				} catch (const ToolError&) {
 					return false;  // main thread stalled mid-load — condition not met yet
@@ -2471,7 +2566,7 @@ namespace dvb
 						const auto& hand = a_cond == "castingArtLeft" ? snap.observation.left : snap.observation.right;
 						return hand.casterPresent && hand.artAttached;
 					},
-						milliseconds(2000));
+						a_stallLimit);
 					return r.get<bool>();
 				} catch (const ToolError&) {
 					return false;
@@ -2480,8 +2575,43 @@ namespace dvb
 			if (a_cond == "noMenu")
 				return GetOpenMenus().empty();
 			if (a_cond == "noBlockingMenu")
-				return BlockingMenus().empty();
+				return BlockingMenus(std::min(a_stallLimit, milliseconds(1000))).empty();
 			throw ToolError(400, std::format("unknown waitUntil condition '{}' (playerLoaded|noModal|noMenu|noBlockingMenu|weaponDrawn|handsReady|castingArtLeft|castingArtRight)", a_cond));
+		}
+
+		constexpr long long kMaxRealWaitMs = 25000;  // under the bridge's 30 s request timeout
+		constexpr long long kDefaultUntilTimeoutMs = 10000;
+		constexpr long long kStallLimitMs = 2000;
+		constexpr auto      kUntilPollInterval = milliseconds(100);
+
+		json RealTimeWait(const json& a_args)
+		{
+			const auto start = steady_clock::now();
+			const auto elapsedMs = [&] { return duration_cast<milliseconds>(steady_clock::now() - start).count(); };
+
+			if (a_args.contains("ms")) {
+				const json& ms = a_args["ms"];
+				if (!ms.is_number_integer() || ms.get<long long>() < 0 || ms.get<long long>() > kMaxRealWaitMs)
+					throw ToolError(400, std::format("'ms' must be an integer 0..{}", kMaxRealWaitMs));
+				std::this_thread::sleep_for(milliseconds(ms.get<long long>()));
+				return json{ { "completed", true }, { "waitedMs", elapsedMs() } };
+			}
+
+			const std::string until = a_args.value("until", std::string{});
+			long long         timeoutMs = kDefaultUntilTimeoutMs;
+			if (a_args.contains("timeoutMs")) {
+				const json& t = a_args["timeoutMs"];
+				if (!t.is_number_integer() || t.get<long long>() < 0 || t.get<long long>() > kMaxRealWaitMs)
+					throw ToolError(400, std::format("'timeoutMs' must be an integer 0..{}", kMaxRealWaitMs));
+				timeoutMs = t.get<long long>();
+			}
+			const auto remainingMs = [&] { return std::max(timeoutMs - elapsedMs(), 1LL); };
+			while (!CheckState(until, milliseconds(std::min(kStallLimitMs, remainingMs())))) {
+				if (elapsedMs() >= timeoutMs)
+					return json{ { "completed", false }, { "reason", "timeout" }, { "until", until }, { "waitedMs", elapsedMs() } };
+				std::this_thread::sleep_for(std::min(kUntilPollInterval, milliseconds(remainingMs())));
+			}
+			return json{ { "completed", true }, { "until", until }, { "waitedMs", elapsedMs() } };
 		}
 
 		// Caller must already know a_args["runId"] is present. A bare get<uint64_t>() on a
@@ -2581,6 +2711,20 @@ namespace dvb
 				return out;
 			}
 
+			/// Every retained run, oldest first, without transcripts.
+			json List()
+			{
+				std::lock_guard lock(m_mtx);
+				json            out = json::array();
+				for (const auto& [id, st] : m_runs) {
+					json entry{ { "runId", id }, { "done", st.done } };
+					if (st.done)
+						entry["ok"] = st.ok;
+					out.push_back(std::move(entry));
+				}
+				return out;
+			}
+
 		private:
 			struct State
 			{
@@ -2659,7 +2803,11 @@ namespace dvb
 				// Per-repetition, not per-run: a scene mismatch on rep N must not poison rep N+1's
 				// captures if rep N+1's own scene assert succeeds.
 				bool runSceneMismatch = false;
+				// A waitFor right after a waitFor resumes from the event the previous one matched.
+				ScenarioPolicy::WaitForChain waitChain;
 				for (size_t i = 0; i < steps.size() && !aborted; ++i) {
+					// Taken by every step: only a waitFor branch that runs and matches sets it again.
+					const std::optional<uint64_t> prevWaitForSince = waitChain.Take();
 					if (a_options.beforeStep)
 						a_options.beforeStep(i);
 					const json& step = steps[i];
@@ -2765,8 +2913,8 @@ namespace dvb
 							// Optional: auto-answer a matching modal each poll (e.g. the content-mismatch
 							// box a restore raises before postLoadGame can fire).
 							const std::string acceptBody = step.value("acceptModal", json::object()).value("matchBody", std::string{});
-							// Only events published after this step begins count.
-							uint64_t   since = a_events.HeadSeq();
+							// Only events published after this step begins (or after the previous waitFor's match) count.
+							uint64_t   since = prevWaitForSince.value_or(a_events.HeadSeq());
 							bool       satisfied = false;
 							const auto deadline = steady_clock::now() + milliseconds(timeoutMs);
 							while (steady_clock::now() < deadline) {
@@ -2784,7 +2932,9 @@ namespace dvb
 								std::this_thread::sleep_for(milliseconds(pollMs));
 							}
 							r["satisfied"] = satisfied;
-							if (!satisfied) {
+							if (satisfied)
+								waitChain.Matched(since);
+							else {
 								r["timedOut"] = true;
 								stepFailed = true;
 							}
@@ -3128,16 +3278,22 @@ namespace dvb
 				"'name' via the UI queue (kShow) — opens hub menus from a plain name (TweenMenu, "
 				"'Journal Menu', MagicMenu, MapMenu, StatsMenu, InventoryMenu, FavoritesMenu); context "
 				"menus that need a target ref (ContainerMenu/BarterMenu/BookMenu) won't open this way. "
-				"'close' hides a menu by 'name' via the UI queue (kHide). 'invoke' dispatches to a "
+				"'close' hides a menu by 'name' via the UI queue (kHide). 'readBook' opens the real BookMenu for a "
+				"book 'formId' (a book form or a reference to one; 'activate' reads a world reference as the player does). "
+				"'autoDismiss' with 'names' (an array; [] clears) hides those menus the moment they open (e.g. [\"Tutorial Menu\"]); without 'names' it "
+				"returns the list; a message box cannot be listed. 'invoke' dispatches to a "
 				"consumer-registered (mod) menu by 'name' — NOT 'open' (mod menus aren't engine menus). A mod "
 				"exposes its menu via the C-ABI RegisterMenuHandler; 'list' returns those under 'registered'.";
 			menu.description += RegisteredExtensionSummary("menu", "menus (invoke with action='invoke', name=<x>)");
 			menu.inputSchema = json{
 				{ "type", "object" },
 				{ "properties", json{
-									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "describe", "accept", "open", "close", "invoke" }) }, { "description", "list | describe | accept | open | close | invoke" } } },
+									{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "describe", "accept", "open", "close", "invoke", "readBook", "autoDismiss" }) }, { "description", "list | describe | accept | open | close | invoke | readBook | autoDismiss" } } },
+									{ "formId", json{ { "type", "string" }, { "description", "readBook: hex FormID or EditorID of a book form (the tool does not check inventory) or of a reference to a book in the world; opens the real BookMenu." } } },
+									{ "activate", json{ { "type", "boolean" }, { "description", "readBook: activate the reference as the player does (TESObjectBOOK::Activate) instead of opening the menu directly; needs a reference." } } },
 									{ "name", json{ { "type", "string" }, { "description", "open/close: ENGINE menu to show/hide (e.g. TweenMenu). invoke/describe: a registered mod menu (see list .registered, or this tool's description)." } } },
 									{ "index", json{ { "type", "integer" }, { "description", "accept: 0-based button index to select (default 0). See describe's buttons/cancelIndex." } } },
+									{ "names", json{ { "type", "array" }, { "items", json{ { "type", "string" } } }, { "description", "autoDismiss: menu names to hide on open ([] clears; omit to list)." } } },
 								} },
 			};
 			ToolExtensions::MergeExtensionArgs(menu.name, menu.inputSchema);  // invoke name=<mod menu> gets the full args
@@ -3197,7 +3353,9 @@ namespace dvb
 			"before anything has loaded) plus top-level metaAvailable/metaNote if none parsed; "
 			"'loadLast' loads the most recent save (a settled real-game state — avoids coc's "
 			"heavy new-game init); 'load'/'save' take a 'name' ('load' skips the mod-mismatch "
-			"confirmation modal). All but 'list' are fire-and-forget; watch lifecycle events / "
+			"confirmation modal). 'delete' (param 'name') removes that save through the engine's own "
+			"Delete (SE/AE only, irreversible) and reports the result. All other actions except 'list' are "
+			"fire-and-forget; watch lifecycle events / "
 			"inspect playerLoaded for completion. 'advanceTime' (param 'hours', non-zero, may be "
 			"negative) jumps the calendar directly — no need to fall back to console 'set timescale "
 			"to N' and waiting real time — and returns { gameHour, daysPassed, day, month, year } "
@@ -3223,9 +3381,10 @@ namespace dvb
 		game.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
-								{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "save", "load", "loadLast", "advanceTime", "getTimeScale", "setTimeScale", "getDifficulty", "setDifficulty", "getAlwaysActive", "setAlwaysActive" }) }, { "description", "list | save | load | loadLast | advanceTime | getTimeScale | setTimeScale | getDifficulty | setDifficulty | getAlwaysActive | setAlwaysActive" } } },
-								{ "name", json{ { "type", "string" }, { "description", "save file name (required for save/load; from action='list')" } } },
-								{ "dir", json{ { "type", "string" }, { "description", "list/load/loadLast: override the saves directory (default resolves from sLocalSavePath)" } } },
+								{ "action", json{ { "type", "string" }, { "enum", json::array({ "list", "save", "load", "loadLast", "delete", "advanceTime", "getTimeScale", "setTimeScale", "getDifficulty", "setDifficulty", "getAlwaysActive", "setAlwaysActive" }) }, { "description", "list | save | load | loadLast | delete | advanceTime | getTimeScale | setTimeScale | getDifficulty | setDifficulty | getAlwaysActive | setAlwaysActive" } } },
+								{ "name", json{ { "type", "string" }, { "description", "save file name (required for save/load/delete; from action='list')" } } },
+								{ "save", json{ { "type", "string" }, { "description", "alias for name" } } },
+								{ "dir", json{ { "type", "string" }, { "description", "list/load/loadLast: override the saves directory (default resolves from sLocalSavePath; delete does not take it)" } } },
 								{ "filter", json{ { "type", "string" }, { "description", "list only: case-insensitive substring to match against save names" } } },
 								{ "limit", json{ { "type", "integer" }, { "description", "list only: cap the number of saves returned (newest-first); must be > 0 if given" } } },
 								{ "detail", json{ { "type", "boolean" }, { "description", "list only: add per-save character/location/level metadata (default false)" } } },
@@ -3367,6 +3526,7 @@ namespace dvb
 			{ "properties", json{
 								{ "action", json{ { "type", "string" }, { "enum", json::array({ "find", "headParts", "describe", "plugins", "asset" }) }, { "description", "find | headParts | describe | plugins | asset" } } },
 								{ "formType", json{ { "type", "string" }, { "description", "find: Armor | ArmorAddon | HeadPart | Idle | NPC | Weapon | Misc" } } },
+								{ "type", json{ { "type", "string" }, { "description", "alias for formType" } } },
 								{ "name", json{ { "type", "string" }, { "description", "find: case-insensitive substring of the name or EditorID; plugins: of the plugin name, author or description (see filter)" } } },
 								{ "model", json{ { "type", "string" }, { "description", "find: case-insensitive substring of any model path (Armor, ArmorAddon, HeadPart)" } } },
 								{ "plugin", json{ { "type", "string" }, { "description", "find: case-insensitive substring of the plugin the form comes from" } } },
@@ -3444,6 +3604,8 @@ namespace dvb
 
 			FormSearch::Query query;
 			query.formType = text("formType");
+			if (query.formType.empty())
+				query.formType = text("type");
 			if (query.formType.empty())
 				throw ToolError(400, std::format("'formType' is required for find ({})", FormSearch::SupportedTypes()));
 			query.name = text("name");
@@ -3554,6 +3716,8 @@ namespace dvb
 		a_registry.Register(BuildInspectDescriptor(), &InspectHandler);
 		a_registry.Register(BuildMenuDescriptor(), &MenuHandler);
 		a_registry.Register(Capture::BuildCaptureDescriptor(), &Capture::Handle);
+		a_registry.Register(Gfx::BuildDescriptor(), &Gfx::Handle);
+		a_registry.Register(Map::BuildDescriptor(), &Map::Handle);
 
 		// When a mod registers a kind/menu/provider, rebuild that base tool's descriptor so the new
 		// key is discoverable on the first call (the registry's registration path re-registers it
@@ -3641,12 +3805,15 @@ namespace dvb
 		scenario.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
-								{ "action", json{ { "type", "string" }, { "enum", json::array({ "run", "status" }) }, { "description", "run (default, requires 'steps') | status (requires 'runId')" } } },
+								{ "action", json{ { "type", "string" }, { "enum", json::array({ "run", "status", "list" }) }, { "description", "run (default, requires 'steps') | status (requires 'runId') | list (retained run ids and their state)" } } },
 								{ "steps", json{ { "type", "array" }, { "description", "run: ordered steps; each is one of tool/wait/waitFor/waitUntil (see description)" }, { "items", json{ { "type", "object" } } } } },
 								{ "repeat", json{ { "type", "integer" }, { "description", "run: run the whole step list N times (default 1, max 1000)" } } },
 								{ "continueOnError", json{ { "type", "boolean" }, { "description", "run: keep going after a failed/timed-out step instead of aborting (default false)" } } },
 								{ "async", json{ { "type", "boolean" }, { "description", "run: return {queued:true, runId} immediately and run in the background (default false); true does not block" } } },
 								{ "runId", json{ { "type", "integer" }, { "description", "status: poll an async run started earlier (from run's 'runId')" } } },
+								{ "verbose", json{ { "type", "boolean" }, { "description", "status: return every step's result (default: a step count plus the failed steps)" } } },
+								{ "from", json{ { "type", "integer" }, { "description", "status: first step of a slice of the transcript" } } },
+								{ "limit", json{ { "type", "integer" }, { "description", "status: size of that slice (default 20)" } } },
 							} },
 		};
 		a_registry.Register(std::move(scenario),
@@ -3657,11 +3824,13 @@ namespace dvb
 						throw ToolError(400, "action='status' requires 'runId'");
 					const uint64_t runId = ParseRunId(a_args);
 					if (auto st = RunRegistry::Get().Status(runId))
-						return *st;
+						return RunStatusLogic::Compact(*st, a_args);
 					throw ToolError(404, std::format("unknown scenario runId {}", runId));
 				}
+				if (action == "list")
+					return json{ { "runs", RunRegistry::Get().List() } };
 				if (action != "run")
-					throw ToolError(400, std::format("unknown action '{}' (run|status)", action));
+					throw ToolError(400, std::format("unknown action '{}' (run|status|list)", action));
 				if (!a_args.contains("steps") || !a_args["steps"].is_array())
 					throw ToolError(400, "action='run' requires a 'steps' array");
 
@@ -4004,7 +4173,7 @@ namespace dvb
 				if (action == "status" && a_args.contains("runId")) {
 					const uint64_t runId = ParseRunId(a_args);
 					if (auto st = RunRegistry::Get().Status(runId))
-						return *st;
+						return RunStatusLogic::Compact(*st, a_args);
 					throw ToolError(404, std::format("unknown replay runId {}", runId));
 				}
 				return Recording::Handle(a_args, a_events);
@@ -4036,20 +4205,31 @@ namespace dvb
 		ToolDescriptor wait;
 		wait.name = "wait";
 		wait.description =
-			"Advance time by waiting `hours`, synchronously and without touching the Wait "
-			"menu's UI at all: starts the wait and returns once the game has run it to the end, "
-			"one tick per frame as with the menu open (no autosave) — no polling needed. Refuses with "
+			"Three ways to wait. `hours`: advance GAME time, synchronously and without touching the Wait "
+			"menu's UI: starts the wait and returns once the game has run it to the end, "
+			"one tick per frame as with the menu open (no autosave); refuses with "
 			"{ completed:false, reason } on the same gate the menu itself enforces (combat, "
-			"trespassing, midair, hostiles nearby, etc.).";
+			"trespassing, midair, hostiles nearby, etc.). `ms`: pause in REAL time. `until`: poll a live "
+			"condition (playerLoaded|noModal|noMenu|noBlockingMenu|weaponDrawn|handsReady|castingArtLeft|"
+			"castingArtRight) and return when it holds, or { completed:false, reason:'timeout' } after `timeoutMs`.";
 		wait.inputSchema = json{
 			{ "type", "object" },
 			{ "properties", json{
-								{ "hours", json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", kMaxWaitHours }, { "description", "hours to wait (> 0)" } } },
+								{ "hours", json{ { "type", "integer" }, { "minimum", 1 }, { "maximum", kMaxWaitHours }, { "description", "game-time hours to wait (> 0); omit for a real-time wait" } } },
+								{ "ms", json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", kMaxRealWaitMs }, { "description", "real-time milliseconds to pause (max 25000; loop for longer)" } } },
+								{ "until", json{ { "type", "string" }, { "description", "live condition to wait for (see the tool description)" } } },
+								{ "timeoutMs", json{ { "type", "integer" }, { "minimum", 0 }, { "maximum", kMaxRealWaitMs }, { "description", "until: give up after this long (default 10000; max 25000, so the call finishes inside the bridge's request timeout)" } } },
 							} },
-			{ "required", json::array({ "hours" }) },
 		};
 		a_registry.Register(std::move(wait), [](const json& a_args, const ToolContext&) {
-			return WaitOrSleepHandler(a_args, false);
+			const int modes = static_cast<int>(a_args.contains("hours")) + static_cast<int>(a_args.contains("ms")) + static_cast<int>(a_args.contains("until"));
+			if (modes > 1)
+				throw ToolError(400, "wait takes one of 'hours', 'ms' or 'until', not a combination");
+			if (a_args.contains("hours"))
+				return WaitOrSleepHandler(a_args, false);
+			if (a_args.contains("ms") || a_args.contains("until"))
+				return RealTimeWait(a_args);
+			throw ToolError(400, "wait needs 'hours' (game time), 'ms' (real-time pause) or 'until' (a live condition)");
 		});
 
 		ToolDescriptor sleep;

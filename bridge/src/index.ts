@@ -110,6 +110,17 @@ async function main(): Promise<void> {
   // when the live one no longer matches it. Undefined until the client first lists.
   let reported: string | undefined;
 
+  // Compares the live tool list with the one last handed to the client and pushes
+  // tools/list_changed when they differ. Throws when the game cannot be reached.
+  const notifyIfToolListChanged = async (): Promise<void> => {
+    if (reported === undefined) return;
+    const live = JSON.stringify((await listTools(target)).map(toMcpTool));
+    if (live !== reported) {
+      reported = live; // don't repeat the notice to a client that has not re-listed yet
+      await server.sendToolListChanged();
+    }
+  };
+
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     let tools;
     try {
@@ -152,16 +163,10 @@ async function main(): Promise<void> {
     }
     const next =
       Date.now() - gameSeenAt < STARTUP_WINDOW_MS ? FAST_POLL_MS : SLOW_POLL_MS;
-    if (reported === undefined) return next;
-    let live: string;
     try {
-      live = JSON.stringify((await listTools(target)).map(toMcpTool));
+      await notifyIfToolListChanged();
     } catch {
-      return next;
-    }
-    if (live !== reported) {
-      reported = live; // don't repeat the notice to a client that has not re-listed yet
-      await server.sendToolListChanged();
+      // the game went down between the health check and the list: the next poll sees it
     }
     return next;
   };
@@ -191,6 +196,18 @@ async function main(): Promise<void> {
         e instanceof GameUnavailableError
           ? `game not running (target: ${target.label})`
           : (e as Error).message;
+      // The game restarted (or a provider plugin did not load) since the client
+      // fetched tools/list, so it still advertises a tool this game lacks: tell it
+      // to fetch the list again.
+      if (/unknown tool/i.test(message)) {
+        notifyIfToolListChanged().catch((err: unknown) => {
+          if (!(err instanceof GameUnavailableError)) {
+            console.error(
+              `devbench-bridge: tools/list_changed check failed: ${(err as Error).message}`,
+            );
+          }
+        });
+      }
       return {
         content: [
           {

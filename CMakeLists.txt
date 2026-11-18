@@ -11,7 +11,7 @@ cmake_minimum_required(VERSION 3.23)
 # same sources with no per-buildsystem #ifdefs.
 
 set(NAME "devbench")
-set(VERSION 1.32.0)
+set(VERSION 1.36.0)
 
 project(${NAME} VERSION ${VERSION} LANGUAGES CXX)
 
@@ -102,6 +102,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 	# Only the header is compiled here — DevBenchAPI.cpp is the CONSUMER half and is
 	# deliberately not a source of this target.
 	${CMAKE_CURRENT_SOURCE_DIR}/include
+	# openvr.h (IVRSystem_019 / IVRCompositor_022, the versions Fallout4VR.exe asks for) for the
+	# core's VR input. Header only: the interfaces are looked up at runtime, nothing links
+	# openvr_api.lib. Skyrim gets its openvr.h from CommonLibSSE-NG.
+	${CMAKE_CURRENT_SOURCE_DIR}/extern/openvr
 	${STB_INCLUDE_DIRS}
 )
 

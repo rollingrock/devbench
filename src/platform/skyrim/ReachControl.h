@@ -4,17 +4,19 @@
 #include "core/ToolRegistry.h"
 
 #include <string>
+#include <vector>
 
+// Reach, Skyrim's way to place the VR hands: it calibrates how a tracking-space move shows up
+// at the hand bones, then corrects until each hand sits at its node. Fallout uses Pose
+// (core/PoseControl.cpp) instead, since its Wands sit straight at the controllers.
 namespace dvb::ReachControl
 {
-	/// Starts an asynchronous reach run and returns {queued, runId, owner, contract}.
-	json Start(const json& a_args, const std::string& a_owner, const ToolContext& a_ctx);
-	/// Reports progress for a run (the latest run when 'runId' is omitted).
-	json Status(const json& a_args);
-	/// Requests the active run to stop; the owner must match.
-	json Stop(const std::string& a_owner);
-	/// True while a run is queued, calibrating, reaching or holding.
-	bool Active();
-	/// Stops any active run; called on game load and new game.
+	/// The input actions Reach answers (reach, reachStatus, reachStop), for capabilities.
+	std::vector<std::string> Actions();
+	/// Whether a_action is one of Actions().
+	bool IsAction(const std::string& a_action);
+	/// Answers one Reach input action with the vrTrackedSet owner the arguments resolve to.
+	json Handle(const std::string& a_action, const json& a_args, const ToolContext& a_ctx);
+	/// Stops any active run and drops the cached calibrations; called on game load and new game.
 	void EndSession();
 }

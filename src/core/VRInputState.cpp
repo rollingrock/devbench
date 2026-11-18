@@ -81,6 +81,17 @@ namespace dvb
 		return VRSequenceStopAccess::kAllowed;
 	}
 
+	/**
+	 * Whether a new sequence may take over this one's frames in place: only while it is
+	 * committed and running (not starting, finishing or restoring), and only for the caller
+	 * holding both its owner and its controlToken.
+	 */
+	bool VRSequenceTransaction::CanReplace(std::string_view a_owner, std::string_view a_controlToken) const
+	{
+		return m_active && !m_terminalClaimed && !a_controlToken.empty() &&
+		       a_controlToken == m_controlToken && a_owner == m_owner;
+	}
+
 	VRSequenceFinishAction VRSequenceTransaction::ClaimFinish(std::uint64_t a_generation)
 	{
 		if (m_generation != a_generation)
@@ -345,5 +356,103 @@ namespace dvb
 		return json{ { "tMs", a_frame.tMs }, { "seq", a_frame.seq },
 			{ "originCode", a_frame.originCode }, { "hmd", PoseJson(a_frame.hmd) },
 			{ "left", std::move(left) }, { "right", std::move(right) } };
+	}
+
+	namespace
+	{
+		// k_EButton_SteamVR_Touchpad: the thumbstick's click bit, and its touch bit while deflected
+		constexpr int kThumbstickBit = 32;
+
+		struct PressButton
+		{
+			const char* name;
+			int         bit;   // OpenVR EVRButtonId
+			int         axis;  // axis pair driven to x = 1.0 while pressed, or -1
+			const char* meaning;
+		};
+
+		// OpenVR legacy button ids (openvr.h EVRButtonId) and the axis each analog control reports on.
+		constexpr PressButton kPressButtons[]{
+			{ "trigger", 33, 1, "k_EButton_SteamVR_Trigger; axis 1 x = 1.0" },
+			{ "grip", 2, 2, "k_EButton_Grip; axis 2 x = 1.0" },
+			{ "a", 7, -1, "k_EButton_A (A / X)" },
+			{ "b", 1, -1, "k_EButton_ApplicationMenu (B / Y)" },
+			{ "thumbstick", kThumbstickBit, -1, "k_EButton_SteamVR_Touchpad (stick or touchpad click)" },
+		};
+	}
+
+	json VRPressButtonsJson()
+	{
+		json out = json::object();
+		for (const auto& button : kPressButtons)
+			out[button.name] = button.meaning;
+		return out;
+	}
+
+	/**
+	 * Reads one press. 'stick' [x, y] (each -1..1, y up) deflects the thumbstick on axis 0 and
+	 * touches it, the way a thumb resting on it does; it does not click it ('thumbstick' in
+	 * buttons does). A press needs buttons, a stick, or both.
+	 */
+	VRPressRequest ParseVRPress(const json& a_args)
+	{
+		VRPressRequest press;
+		if (!a_args.contains("hand") || !a_args["hand"].is_string())
+			throw std::invalid_argument("press requires 'hand' ('left' or 'right')");
+		const auto hand = a_args["hand"].get<std::string>();
+		if (hand != "left" && hand != "right")
+			throw std::invalid_argument(std::format("'hand' must be 'left' or 'right', not '{}'", hand));
+		press.right = hand == "right";
+
+		if (a_args.contains("stick")) {
+			const auto stick = FloatArray<2>(a_args, "stick");
+			if (std::abs(stick[0]) > 1.0f || std::abs(stick[1]) > 1.0f)
+				throw std::invalid_argument("'stick' must be [x, y] with each in [-1, 1]");
+			press.stick = stick;
+			press.axes[0] = stick[0];
+			press.axes[1] = stick[1];
+			press.touched |= 1ull << kThumbstickBit;
+		}
+
+		if (!a_args.contains("buttons")) {
+			if (!press.stick)
+				throw std::invalid_argument("press requires 'buttons' (a non-empty array of button names), 'stick' ([x, y]), or both");
+		} else if (!a_args["buttons"].is_array() || a_args["buttons"].empty())
+			throw std::invalid_argument("'buttons' must be a non-empty array of button names");
+		for (const auto& item : a_args.value("buttons", json::array())) {
+			if (!item.is_string())
+				throw std::invalid_argument("'buttons' must contain button names");
+			const auto  name = item.get<std::string>();
+			const auto* match = std::find_if(std::begin(kPressButtons), std::end(kPressButtons),
+				[&](const PressButton& a_button) { return name == a_button.name; });
+			if (match == std::end(kPressButtons)) {
+				std::string known;
+				for (const auto& button : kPressButtons)
+					known += std::string(known.empty() ? "" : ", ") + button.name;
+				throw std::invalid_argument(std::format("unknown button '{}' (known: {})", name, known));
+			}
+			const std::uint64_t bit = 1ull << match->bit;
+			press.pressed |= bit;
+			press.touched |= bit;
+			if (match->axis >= 0)
+				press.axes[static_cast<std::size_t>(match->axis) * 2] = 1.0f;
+			press.buttons.push_back(name);
+		}
+
+		press.durationMs = ParseBoundedIntegerArgument(a_args, "durationMs", kDefaultPressMs, 10, kMaximumPressMs);
+		press.delayMs = ParseBoundedIntegerArgument(a_args, "delayMs", 0, 0, kMaximumPressDelayMs);
+		return press;
+	}
+
+	VRControllerState ApplyVRPress(const VRControllerState& a_state, const VRPressRequest& a_press)
+	{
+		VRControllerState out = a_state;
+		out.pressed |= a_press.pressed;
+		out.touched |= a_press.touched;
+		for (std::size_t i = 0; i < out.axes.size(); ++i) {
+			if (a_press.axes[i])
+				out.axes[i] = *a_press.axes[i];
+		}
+		return out;
 	}
 }

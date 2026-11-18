@@ -1,0 +1,43 @@
+# The devbench Python client: distribution devbench-client, import package devbench. The version comes from the
+# repo's git tag (setuptools-scm), so the package and the DLL share a number.
+
+[build-system]
+requires = ["setuptools>=77", "setuptools-scm>=9"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devbench-client"
+dynamic = ["version"]
+description = "Python client for devbench's REST port, and a pytest plugin for in-game end-to-end tests."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+# The client never imports pytest; the opt-in plugin (devbench.testing) does.
+dependencies = ["pytest>=8.1"]
+
+[tool.setuptools.package-data]
+devbench = ["py.typed"]
+
+[tool.setuptools_scm]
+root = "../.."
+# A checkout without tags (a shallow clone, a source zip) still installs.
+fallback_version = "0.0.0"
+
+[tool.setuptools_scm.scm.git]
+# Fallout releases are tagged fo4-vX.Y.Z (X.Y.Z the DLL's CMakeLists.txt version); the Skyrim release's vX.Y.Z tags
+# never count. The default tag regex strips the `fo4-` prefix, so on a release tag this package's version is the
+# DLL's. This table needs setuptools-scm 9.
+describe_command = "git describe --dirty --tags --long --match fo4-v*"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# pre-commit runs ruff on clients/python/ only.
+[tool.ruff]
+line-length = 120
+# Lowest Python the package supports; keep in step with requires-python.
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

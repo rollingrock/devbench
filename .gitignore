@@ -11,6 +11,12 @@ build/
 vs*/
 node_modules/
 
+# python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
 # files
 *.zip
 compile_commands.json

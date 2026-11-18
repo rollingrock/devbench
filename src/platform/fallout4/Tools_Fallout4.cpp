@@ -17,8 +17,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstring>
+#include <functional>
 #include <optional>
+#include <thread>
 
 // Fallout 4 / Fallout 4 VR game tools.
 //
@@ -490,6 +493,94 @@ namespace dvb
 			delete script;  // the engine's own deleting destructor, through the vtable
 			return compiled;
 		}
+	}
+
+	/**
+	 * Main thread. Runs a_command (';'-separated commands, none leaving the world) now and
+	 * returns { executed, command, compiled, captured, count, lines, ... } with the output it
+	 * printed, read from the console buffer before and after inside this one task.
+	 */
+	json RunConsoleCapture(const std::string& a_command, std::size_t a_maxLines)
+	{
+		const auto commands = ConsoleLogCapture::SplitConsoleCommands(a_command);
+		if (commands.empty())
+			throw ToolError(400, "console: 'command' has no command in it");
+
+		// The echo ExecuteCommand would print, so the console history still shows
+		// what ran. Before the baseline, so it is not part of the output.
+		if (auto* log = RE::ConsoleLog::GetSingleton())
+			log->AddString((a_command + "\n").c_str());
+		const auto before = ReadConsoleBuffer();
+		bool       compiled = true;
+		for (const auto& one : commands)
+			compiled = RunConsoleCommandNow(one) && compiled;
+		const auto after = ReadConsoleBuffer();
+
+		json r{ { "executed", true }, { "command", a_command }, { "compiled", compiled } };
+		if (!before || !after) {
+			r["captured"] = false;
+			r["note"] = "the console buffer could not be read, so the output was not captured; read the in-game console";
+			return r;
+		}
+		const auto appended = ConsoleLogCapture::AppendedLines(*after, before->size(), a_maxLines);
+		r["captured"] = true;
+		r["count"] = appended.lines.size();
+		r["lines"] = appended.lines;
+		if (appended.omitted)
+			r["omitted"] = appended.omitted;
+		if (appended.drained)
+			r["drained"] = true;
+		if (after->size() >= kConsoleBufferNearlyFull) {
+			r["bufferNearlyFull"] = true;
+			r["note"] = std::format(
+				"the console buffer holds {} of its {} bytes, and the engine silently drops any line that "
+				"would pass the limit, so output may be missing. It fills only until the Console menu is "
+				"first created, which devbench does before each capture that finds it missing; still full "
+				"means the menu could not be made yet (a loading screen?), so try again.",
+				after->size(), kConsoleBufferLimit);
+		}
+		return r;
+	}
+
+	namespace
+	{
+		/**
+		 * Polls a_check from the listener thread every 50 ms until it holds or a_timeout passes.
+		 */
+		bool PollFor(const std::function<bool()>& a_check, std::chrono::milliseconds a_timeout)
+		{
+			const auto deadline = std::chrono::steady_clock::now() + a_timeout;
+			while (!a_check()) {
+				if (std::chrono::steady_clock::now() >= deadline)
+					return false;
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			}
+			return true;
+		}
+
+		/**
+		 * Makes the Console menu if the engine has not yet (shows it, then hides it), so the
+		 * console buffer is drained from then on. Until the menu exists the buffer only fills, and
+		 * once it nears 64 KB the engine drops every print, captures included. Listener thread.
+		 * Returns nullopt when the menu already existed, else whether it was made.
+		 */
+		std::optional<bool> EnsureConsoleMenuMade()
+		{
+			if (!RE::UI::GetSingleton() || IsMenuCreated(RE::Console::MENU_NAME))
+				return std::nullopt;
+			const auto queue = [](RE::UI_MESSAGE_TYPE a_type) {
+				MainThread::RunAndWait([a_type]() -> json {
+					if (auto* q = RE::UIMessageQueue::GetSingleton())
+						q->AddMessage(RE::Console::MENU_NAME, a_type);
+					return true;
+				});
+			};
+			queue(RE::UI_MESSAGE_TYPE::kShow);
+			const bool made = PollFor([] { return IsMenuCreated(RE::Console::MENU_NAME); }, std::chrono::seconds(2));
+			queue(RE::UI_MESSAGE_TYPE::kHide);
+			PollFor([] { return !std::ranges::contains(GetOpenMenus(), std::string(RE::Console::MENU_NAME)); }, std::chrono::seconds(2));
+			return made;
+		}
 
 		json ConsoleHandler(const json& a_args, const ToolContext&)
 		{
@@ -540,47 +631,16 @@ namespace dvb
 					std::ranges::equal(std::string_view(command).substr(0, kForEachRef.size()), kForEachRef,
 						[](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == b; }))
 					throw ToolError(400, "console: a ForEachRef[...] block only runs through the console's queue; pass capture=false");
-				const auto commands = ConsoleLogCapture::SplitConsoleCommands(command);
-				if (commands.empty())
+				if (ConsoleLogCapture::SplitConsoleCommands(command).empty())
 					throw ToolError(400, "console: 'command' has no command in it");
+
+				const auto madeConsole = EnsureConsoleMenuMade();
 
 				// One task for the baseline, the commands and the read: the Console menu can
 				// only drain the buffer after this task returns.
-				out = MainThread::RunAndWait([command, commands, maxLines]() -> json {
-					// The echo ExecuteCommand would print, so the console history still shows
-					// what ran. Before the baseline, so it is not part of the output.
-					if (auto* log = RE::ConsoleLog::GetSingleton())
-						log->AddString((command + "\n").c_str());
-					const auto before = ReadConsoleBuffer();
-					bool       compiled = true;
-					for (const auto& one : commands)
-						compiled = RunConsoleCommandNow(one) && compiled;
-					const auto after = ReadConsoleBuffer();
-
-					json r{ { "executed", true }, { "command", command }, { "compiled", compiled } };
-					if (!before || !after) {
-						r["captured"] = false;
-						r["note"] = "the console buffer could not be read, so the output was not captured; read the in-game console";
-						return r;
-					}
-					const auto appended = ConsoleLogCapture::AppendedLines(*after, before->size(), maxLines);
-					r["captured"] = true;
-					r["count"] = appended.lines.size();
-					r["lines"] = appended.lines;
-					if (appended.omitted)
-						r["omitted"] = appended.omitted;
-					if (appended.drained)
-						r["drained"] = true;
-					if (after->size() >= kConsoleBufferNearlyFull) {
-						r["bufferNearlyFull"] = true;
-						r["note"] = std::format(
-							"the console buffer holds {} of its {} bytes, and the engine silently drops any line that "
-							"would pass the limit, so output may be missing. It fills only until the Console menu is "
-							"first created: menu action='open' then 'close' with name='Console' drains it for good.",
-							after->size(), kConsoleBufferLimit);
-					}
-					return r;
-				});
+				out = MainThread::RunAndWait([command, maxLines]() -> json { return RunConsoleCapture(command, maxLines); });
+				if (madeConsole)
+					out["madeConsoleMenu"] = *madeConsole;
 			}
 			out["blocked"] = blocked;
 			if (blocked) {
@@ -778,6 +838,8 @@ namespace dvb
 	void RegisterGameTools(ToolRegistry& a_registry, EventBus&)
 	{
 		a_registry.Register(BuildInspectDescriptor(), &InspectHandler);
+		RegisterInputTool(a_registry);
+		RegisterPlayerTool(a_registry);
 
 		// When a plugin registers an inspect kind, rebuild the descriptor so the kind is in
 		// tools/list from the next call (re-registering also fires tools/list_changed).
@@ -804,9 +866,10 @@ namespace dvb
 				"maxLines (default 200, max 5000), the most recent; `omitted` counts the rest. "
 				"compiled=false means the command did not compile (the reason is in `lines`); "
 				"captured=true with no lines means it printed nothing; captured=false means the buffer "
-				"could not be read. `bufferNearlyFull` means lines may have been dropped by the engine's "
-				"64 KB limit, which only applies before the Console menu is first opened (the note says "
-				"how to clear it). Several commands separated by ';' run in order, as in the console; "
+				"could not be read. Until the Console menu is first created the engine's buffer only fills, "
+				"and past 64 KB it drops every print, so a capture that finds the menu missing creates it "
+				"first (shown and hidden at once; `madeConsoleMenu` says whether that worked). "
+				"`bufferNearlyFull` means lines may have been dropped by that limit. Several commands separated by ';' run in order, as in the console; "
 				"`compiled` is false if any did not compile. A ForEachRef[...] block needs capture=false, "
 				"which queues the line exactly as if typed; it then runs on a later frame and returns no "
 				"output (queued=true). A line with a command that leaves the current world (load, "

@@ -1,5 +1,6 @@
 #include "GameEvents.h"
 
+#include "ModalWatch.h"
 #include "Recording.h"
 #include "core/EventBus.h"
 #include "core/Json.h"
@@ -39,6 +40,7 @@ namespace dvb
 					if (g_bus)
 						g_bus->Publish("menu", json{ { "name", name }, { "opening", a_event->opening } });
 					Recording::NoteMenuState(name, a_event->opening);
+					ModalWatch::OnMenuEvent(name, a_event->opening);
 				}
 				return RE::BSEventNotifyControl::kContinue;
 			}

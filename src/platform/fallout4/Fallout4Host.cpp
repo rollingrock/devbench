@@ -136,4 +136,26 @@ namespace dvb::host
 			return dir->parent_path().append(gamePath);
 		return *dir;
 	}
+
+	/**
+	 * Sets Main::quitGame, the flag the console's qqq sets; the main loop then runs the
+	 * engine's own shutdown. The offset (+0x24) is CommonLibF4's flat layout, so the block
+	 * is checked by content first: the eight state flags at +0x24 read 0 or 1 and hwnd
+	 * is a live window. A layout that fails the check is refused, not written.
+	 */
+	std::string RequestQuit()
+	{
+		auto* main = RE::Main::GetSingleton();
+		if (!main)
+			return "the engine's Main singleton is null";
+		const auto* flags = reinterpret_cast<const std::uint8_t*>(&main->quitGame);
+		for (int i = 0; i < 8; ++i) {
+			if (flags[i] > 1)
+				return std::format("Main+0x{:X} reads {} where a flag (0 or 1) was expected; the layout differs on this runtime", 0x24 + i, flags[i]);
+		}
+		if (!::IsWindow(reinterpret_cast<::HWND>(main->hwnd)))
+			return "Main::hwnd is not a window; the layout differs on this runtime";
+		main->quitGame = true;
+		return {};
+	}
 }

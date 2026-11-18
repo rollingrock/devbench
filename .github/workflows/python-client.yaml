@@ -1,0 +1,61 @@
+# Python client: installs clients/python and runs its unit tests against the fake
+# server (no game). Formatting and linting run in lint.yaml (pre-commit, ruff).
+name: Python client
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "clients/python/**"
+      - ".github/workflows/python-client.yaml"
+  pull_request:
+    paths:
+      - "clients/python/**"
+      - ".github/workflows/python-client.yaml"
+  workflow_dispatch:
+
+concurrency:
+  group: python-client-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    # The client drives a Windows game, so test on the platform it runs on.
+    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lowest supported (requires-python) and latest.
+        python-version: ["3.10", "3.x"]
+    steps:
+      # setuptools-scm reads the version from the fork's fo4-v* tags; a shallow clone
+      # has none and would fall back to 0.0.0.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install client
+        run: python -m pip install ./clients/python
+
+      - name: Check version resolved from git tags
+        shell: bash
+        run: |
+          version=$(python -c "import devbench; print(devbench.__version__)")
+          echo "devbench-client $version"
+          if [ "$version" = "0.0.0" ]; then
+            echo "::error::setuptools-scm fell back to 0.0.0; tags were not fetched."
+            exit 1
+          fi
+
+      - name: Run unit tests
+        working-directory: clients/python
+        run: python -m pytest -v

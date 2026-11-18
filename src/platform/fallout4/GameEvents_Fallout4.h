@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace dvb
@@ -25,6 +26,8 @@ namespace dvb
 	/// (confirmations, the "content no longer present" load warning, ...). Cheap,
 	/// thread-safe, no main-thread hop.
 	bool IsMessageBoxOpen();
+
+	bool IsMenuCreated(std::string_view a_name);
 
 	/// "menuMap" (ground truth), "events" (sink fallback, RE::UI not up), or "none".
 	/// Reported to callers so a `false` can be told apart from a blind instrument.

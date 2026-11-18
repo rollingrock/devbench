@@ -114,6 +114,25 @@ namespace dvb
 		return { g_openMenus.begin(), g_openMenus.end() };
 	}
 
+	/**
+	 * Whether the engine has created the menu a_name: its menuMap entry holds a live menu,
+	 * open or closed. Read under the map's own lock, no main-thread hop; false while RE::UI is
+	 * not up.
+	 */
+	bool IsMenuCreated(std::string_view a_name)
+	{
+		auto* ui = RE::UI::GetSingleton();
+		if (!ui)
+			return false;
+		RE::BSAutoReadLock l{ RE::UI::GetMenuMapRWLock() };
+		for (const auto& entry : ui->menuMap) {
+			const auto* name = entry.first.c_str();
+			if (name && a_name == name)
+				return static_cast<bool>(entry.second.menu);
+		}
+		return false;
+	}
+
 	bool IsMessageBoxOpen()
 	{
 		if (auto* ui = RE::UI::GetSingleton())

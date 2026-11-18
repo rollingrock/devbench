@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+using dvb::Hand;
 using dvb::json;
 using namespace dvb::ReachLogic;
 
@@ -506,7 +507,7 @@ TEST_CASE("CalibrationFrames produces four legs of four frames")
 	Pose hmd = Upright(Vec3{ 0.0, 0.0, 0.0 });
 	Vec3 rest{ 0.0, 0.0, 0.0 };
 	Vec3 other{ 5.0, 0.0, 0.0 };
-	json frames = CalibrationFrames(true, hmd, rest, other, 0.2);
+	json frames = CalibrationFrames(Hand::Right, hmd, rest, other, 0.2);
 	CHECK(frames.size() == 16);
 	CHECK(frames[0]["tMs"] == 0);
 	CHECK(frames[0]["seq"] == 1);
@@ -536,7 +537,7 @@ TEST_CASE("CalibrationFrames moves the left hand when requested")
 	Pose hmd = Upright(Vec3{ 0.0, 0.0, 0.0 });
 	Vec3 rest{ 0.0, 0.0, 0.0 };
 	Vec3 other{ 5.0, 0.0, 0.0 };
-	json frames = CalibrationFrames(false, hmd, rest, other, 0.2);
+	json frames = CalibrationFrames(Hand::Left, hmd, rest, other, 0.2);
 	CHECK(frames.size() == 16);
 	Vec3 leg1Left = PoseTranslation(frames[4], "left");
 	CHECK(NearXYZ(leg1Left, 0.2, 0.0, 0.0));
@@ -562,10 +563,11 @@ TEST_CASE("ApproachAndHoldFrames blends then holds")
 	Vec3 rightStart{ 0.0, 0.0, 0.0 };
 	Vec3 rightFinal{ 0.0, 10.0, 0.0 };
 	json frames = ApproachAndHoldFrames(hmd, leftStart, leftFinal, rightStart, rightFinal, 5000);
-	CHECK(frames.size() == 11);
+	CHECK(frames.size() == 156);
 	CHECK(frames[0]["tMs"] == 0);
-	CHECK(frames[5]["tMs"] == 1500);
-	CHECK(frames[6]["tMs"] == 2500);
+	CHECK(frames[1]["tMs"] == 10);
+	CHECK(frames[150]["tMs"] == 1500);
+	CHECK(frames[151]["tMs"] == 2500);
 	long previous = -1;
 	for (const json& frame : frames) {
 		long tMs = frame["tMs"].get<long>();
@@ -573,17 +575,32 @@ TEST_CASE("ApproachAndHoldFrames blends then holds")
 		previous = tMs;
 	}
 	Vec3 firstLeft = PoseTranslation(frames[0], "left");
-	Vec3 midLeft = PoseTranslation(frames[3], "left");
-	Vec3 lastBlendLeft = PoseTranslation(frames[5], "left");
-	Vec3 holdLeft = PoseTranslation(frames[6], "left");
+	Vec3 midLeft = PoseTranslation(frames[75], "left");
+	Vec3 lastBlendLeft = PoseTranslation(frames[150], "left");
+	Vec3 holdLeft = PoseTranslation(frames[151], "left");
 	CHECK(NearXYZ(firstLeft, 0.0, 0.0, 0.0));
-	CHECK(NearXYZ(midLeft, 6.0, 0.0, 0.0));
+	CHECK(NearXYZ(midLeft, 5.0, 0.0, 0.0));
 	CHECK(NearXYZ(lastBlendLeft, 10.0, 0.0, 0.0));
 	CHECK(NearXYZ(holdLeft, 10.0, 0.0, 0.0));
 	Vec3 firstRight = PoseTranslation(frames[0], "right");
-	Vec3 lastBlendRight = PoseTranslation(frames[5], "right");
+	Vec3 lastBlendRight = PoseTranslation(frames[150], "right");
 	CHECK(NearXYZ(firstRight, 0.0, 0.0, 0.0));
 	CHECK(NearXYZ(lastBlendRight, 0.0, 10.0, 0.0));
+}
+
+TEST_CASE("ApproachAndHoldFrames eases in and out without a large step")
+{
+	Pose   hmd = Upright(Vec3{ 0.0, 0.0, 0.0 });
+	Vec3   origin{ 0.0, 0.0, 0.0 };
+	Vec3   target{ 10.0, 0.0, 0.0 };
+	json   frames = ApproachAndHoldFrames(hmd, origin, target, origin, origin, 1000);
+	double firstStep = Norm(Sub(PoseTranslation(frames[1], "left"), PoseTranslation(frames[0], "left")));
+	double midStep = Norm(Sub(PoseTranslation(frames[76], "left"), PoseTranslation(frames[75], "left")));
+	double lastStep = Norm(Sub(PoseTranslation(frames[150], "left"), PoseTranslation(frames[149], "left")));
+	CHECK(firstStep < midStep);
+	CHECK(lastStep < midStep);
+	for (std::size_t i = 1; i <= 150; ++i)
+		CHECK(Norm(Sub(PoseTranslation(frames[i], "left"), PoseTranslation(frames[i - 1], "left"))) < 0.11);
 }
 
 TEST_CASE("PhaseName returns lower-camel names")
@@ -675,4 +692,49 @@ TEST_CASE("ApproachAndHoldDurationMs is the last frame time")
 		json frames = ApproachAndHoldFrames(hmd, origin, origin, origin, origin, hold);
 		CHECK(frames.back()["tMs"].get<long>() == ApproachAndHoldDurationMs(hold));
 	}
+}
+
+TEST_CASE("CalibrationReusable holds within half a degree, around the circle")
+{
+	constexpr double kPi = 3.14159265358979323846;
+	const double     quarterDeg = 0.25 * kPi / 180.0;
+	CHECK(CalibrationReusable(1.0, 1.0));
+	CHECK(CalibrationReusable(1.0, 1.0 + quarterDeg));
+	CHECK(!CalibrationReusable(1.0, 1.0 + 4 * quarterDeg));
+	CHECK(CalibrationReusable(kPi - quarterDeg / 2, -kPi + quarterDeg / 2));
+	CHECK(CalibrationReusable(0.0, 2.0 * kPi));
+	CHECK(!CalibrationReusable(0.0, kPi));
+}
+
+TEST_CASE("ParseReach reads a hand's root and calibrate")
+{
+	std::string error;
+	auto        request = Parse(R"({"hands":{"left":{"node":"Chest","root":"player"}},"calibrate":"always"})", error);
+	CHECK(request.has_value());
+	if (!request)
+		return;
+	CHECK(request->left->root == "player");
+	CHECK(request->recalibrate);
+
+	request = Parse(R"({"hands":{"right":{"node":"hmdNode"}}})", error);
+	CHECK(request.has_value());
+	if (!request)
+		return;
+	CHECK(request->right->root.empty());
+	CHECK(!request->recalibrate);
+
+	CHECK(!Parse(R"({"hands":{"left":{"node":"Chest","root":"scene"}}})", error).has_value());
+	CHECK(error.find("root") != std::string::npos);
+	CHECK(!Parse(R"({"hands":{"left":{"node":"Chest"}},"calibrate":"never"})", error).has_value());
+	CHECK(error.find("calibrate") != std::string::npos);
+}
+
+TEST_CASE("ProgressJson reports how each hand was calibrated")
+{
+	Progress progress;
+	CHECK(!ProgressJson(progress).contains("calibration"));
+	progress.calibrationLeft = "reused";
+	json result = ProgressJson(progress);
+	CHECK(result["calibration"]["left"] == "reused");
+	CHECK(!result["calibration"].contains("right"));
 }

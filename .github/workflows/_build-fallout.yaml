@@ -1,0 +1,130 @@
+# Reusable Fallout build: compiles devbench.dll for Fallout 4 / Fallout 4 VR
+# (one DLL for both) with the CMake fallout4-vs2026 preset, vcpkg and the extern/CommonLibF4 submodule, plus
+# the standalone devbench-bridge.exe, uploading each as its own artifact. Called by release-fallout.yaml.
+#
+# A file of its own rather than a job in _build.yaml: _build.yaml is upstream's (Skyrim, xmake) and stays as
+# upstream has it, so merges never touch this file. The bridge job duplicates _build.yaml's for the same
+# reason; it is the same exe for every game.
+#
+# The windows-2025 image ships VS 2026 (v145) only, so the build uses the same preset as a local build. The
+# plugin links the static CRT, so the toolset makes no difference to the game.
+name: "_build-fallout"
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build. Empty = the triggering commit."
+        type: string
+        default: ""
+      artifact-name:
+        description: "Name for the uploaded binaries artifact."
+        type: string
+        default: devbench-fallout-binaries
+    outputs:
+      artifact-name:
+        description: "Artifact name the binaries were uploaded under."
+        value: ${{ inputs.artifact-name }}
+      bridge-artifact-name:
+        description: "Artifact name the bridge exe was uploaded under."
+        value: ${{ inputs.artifact-name }}-bridge
+  # A trial build before pushing a release tag (`gh workflow run _build-fallout.yaml`).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (CMake · fallout4-vs2026)
+    runs-on: windows-2025
+    env:
+      VCPKG_ROOT: C:\vcpkg
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-cache,readwrite
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # Only the two submodules the Fallout build uses; lib/commonlibsse-ng is Skyrim's and large.
+      - name: Fetch Fallout submodules
+        run: git submodule update --init --depth 1 extern/CommonLibF4 lib/cpp-mcp
+
+      # vcpkg resolves vcpkg.json's builtin-baseline from its own git history; the image's clone may predate it.
+      - name: Make vcpkg's history contain the baseline
+        shell: pwsh
+        run: |
+          $baseline = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          git -C $env:VCPKG_ROOT cat-file -e "$baseline^{commit}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git -C $env:VCPKG_ROOT fetch --quiet origin
+            git -C $env:VCPKG_ROOT cat-file -e "$baseline^{commit}"
+            if ($LASTEXITCODE -ne 0) { throw "vcpkg baseline $baseline not found" }
+          }
+          $global:LASTEXITCODE = 0
+
+      # vcpkg's binary cache (VCPKG_BINARY_SOURCES above) kept between runs; only a dependency or baseline change
+      # in vcpkg.json invalidates it.
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v6
+        with:
+          path: vcpkg-cache
+          key: vcpkg-fallout-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-fallout-${{ runner.os }}-
+
+      - name: Configure
+        run: cmake --preset fallout4-vs2026
+
+      - name: Build
+        run: cmake --build --preset fallout4-vs2026 --target devbench
+
+      - name: Stage binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item build/vs2026/Release/devbench.dll staging/
+          Copy-Item build/vs2026/Release/devbench.pdb staging/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name || 'devbench-fallout-binaries' }}
+          path: staging/*
+          if-no-files-found: error
+
+  bridge:
+    name: Build bridge (bun compile)
+    runs-on: windows-2025
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # npm ci so the exe bundles the versions pinned in package-lock.json; bun is only the compiler.
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install bridge dependencies
+        working-directory: bridge
+        run: npm ci
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Compile standalone exe
+        working-directory: bridge
+        run: bun run compile
+
+      - name: Upload bridge binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name || 'devbench-fallout-binaries' }}-bridge
+          path: bridge/dist/devbench-bridge.exe
+          if-no-files-found: error
